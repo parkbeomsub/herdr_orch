@@ -1,0 +1,530 @@
+#!/bin/bash
+# orch — herdr 안에 오케스트레이터(claude) + 에이전트 팬 팀을 만드는 전역 명령어
+#
+# 사용법:
+#   orch [N]                 에이전트 N개로 시작 (기본 4)
+#   orch [N] --team NAME     팀 프리셋으로 구성 (dev|marketing|content|video|growth)
+#   orch --wiki DIR          위키 디렉토리를 분석해 팀 구성을 자동 결정
+#   orch [N] --roles A,B,C   에이전트 역할 이름 직접 지정 (팬 이름 + 프롬프트에 반영)
+#   orch --list-teams        사용 가능한 팀 프리셋 목록
+#   orch [N] --workspace ID  특정 워크스페이스에 생성 (기본: 현재 포커스된 워크스페이스)
+#   orch [N] --cwd DIR          에이전트 작업 디렉토리 (기본: 현재 위치)
+#   orch [N] --yolo             orch 팬까지 권한 확인 없이 실행 (에이전트는 기본이 이미 yolo)
+#   orch [N] --no-yolo          에이전트도 권한 확인을 받게 한다 (기본 yolo 해제)
+#   orch [N] --no-teams         Agent Teams 비활성 (기본은 켜짐)
+#   orch --reharness            팀을 새로 만들지 않고, 지금 떠 있는 팬들의 하네스만 다시 세운다
+#                               (CLAUDE.md·가이드·팀 스펙을 다시 읽어 시스템 프롬프트 재생성 →
+#                                각 팬을 --resume 으로 재기동해 대화 맥락은 유지)
+#   orch --reharness --dry-run  재생성만 하고 팬은 건드리지 않는다 (프롬프트 확인용)
+#   orch [N] --model NAME       에이전트 모델 (기본 opus = Opus 5)
+#   orch [N] --orch-model NAME  오케스트레이터 모델 (기본 claude-opus-5[1m])
+#
+# 예:
+#   orch 4 --roles 리서치,구현,테스트,리뷰
+#
+# 레이아웃:
+#   탭 "orch"  : 왼쪽 50% = orch 팬(오케스트레이터), 오른쪽 50% = 에이전트 최대 4개(가로 스택)
+#   5개 이상   : "agents-2" 탭에 3x3 그리드(9개), 초과 시 "agents-3" ... 탭 추가
+#
+# Agent Teams:
+#   orch가 띄우는 모든 팬에 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 을 주입한다.
+#   전역 settings.json은 건드리지 않으므로 수동 운영 중인 워크스페이스는 영향 없음.
+#   실험 기능이며 /resume 시 in-process 팀원은 복원되지 않는다.
+#
+# 환경변수:
+#   ORCH_CLAUDE_CMD  claude 대신 실행할 명령 (테스트용)
+#   ORCH_MODEL       에이전트 모델 (기본 opus)
+#   ORCH_LEAD_MODEL  오케스트레이터 모델 (기본 claude-opus-5[1m])
+set -euo pipefail
+
+PROMPT_DIR="$HOME/.config/herdr/orch"
+CLAUDE_CMD="${ORCH_CLAUDE_CMD:-claude}"
+PLANNER_CMD="${ORCH_PLANNER_CMD:-$CLAUDE_CMD}"   # 위키 분석용 (헤드리스). 테스트 시 분리 지정 가능
+MODEL="${ORCH_MODEL:-opus}"
+LEAD_MODEL="${ORCH_LEAD_MODEL:-claude-opus-5[1m]}"
+
+N=4
+N_SET=0
+WS=""
+TEAM=""
+WIKI=""
+CWD=""
+# 에이전트는 기본 욜로모드로 띄운다. 팬마다 승인 프롬프트를 눌러줄 수 없어서,
+# 권한 확인에 걸리면 그 에이전트는 blocked로 멈추고 orch가 붙잡혀 있게 된다.
+# orch 팬은 기본에서 뺀다 — pane run(임의 명령)·pane close(파괴적) 승인 관문을 남긴다.
+# --yolo 는 orch까지 켜고, --no-yolo 는 에이전트까지 끈다.
+AGENT_YOLO="--dangerously-skip-permissions"
+LEAD_YOLO=""
+STATUS=""
+REHARNESS=""
+DRYRUN=""
+# Agent Teams(실험 기능)는 orch가 띄우는 팬에서만 켠다. 전역 settings.json을 건드리지 않으므로
+# 수동 운영 중인 다른 워크스페이스는 영향받지 않는다. --no-teams로 끌 수 있다.
+TEAMS_ENV="CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
+ROLES=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --workspace) WS="$2"; shift 2 ;;
+    --team) TEAM="$2"; shift 2 ;;
+    --wiki) WIKI="$2"; shift 2 ;;
+    --roles) IFS=',' read -ra ROLES <<< "$2"; shift 2 ;;
+    --model) MODEL="$2"; shift 2 ;;
+    --orch-model) LEAD_MODEL="$2"; shift 2 ;;
+    --cwd) CWD="$2"; shift 2 ;;
+    --yolo) AGENT_YOLO="--dangerously-skip-permissions"; LEAD_YOLO="--dangerously-skip-permissions"; shift ;;
+    --no-yolo) AGENT_YOLO=""; LEAD_YOLO=""; shift ;;
+    --no-teams) TEAMS_ENV=""; shift ;;
+    --status) STATUS=1; shift ;;
+    --reharness) REHARNESS=1; shift ;;
+    --dry-run) DRYRUN=1; shift ;;
+    --list-teams)
+      for f in "$PROMPT_DIR"/teams/*.json; do
+        [ -f "$f" ] || continue
+        printf '%-10s %s — %s\n' "$(basename "$f" .json)" \
+          "$(jq -r '.name' "$f")" "$(jq -r '.roles | length' "$f")개 역할"
+      done
+      exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) N="$1"; N_SET=1; shift ;;
+  esac
+done
+# 역할 수가 N보다 많으면 N을 역할 수에 맞춘다
+[ "${#ROLES[@]}" -gt "$N" ] && N="${#ROLES[@]}"
+# --roles는 팬 이름만 바꾼다. 프리셋과 같이 쓰면 이름과 프롬프트가 어긋난다.
+if [ "${#ROLES[@]}" -gt 0 ] && [ -n "$TEAM" ]; then
+  echo "경고: --roles가 --team의 역할 이름을 덮어씁니다. 프롬프트는 프리셋 순서 그대로이므로" >&2
+  echo "      이름과 실제 역할이 어긋날 수 있습니다. 둘 중 하나만 쓰는 걸 권합니다." >&2
+fi
+case "$N" in (*[!0-9]*|'') echo "에이전트 수는 숫자여야 합니다: $N" >&2; exit 1 ;; esac
+[ "$N" -ge 1 ] || { echo "에이전트는 최소 1개 필요합니다" >&2; exit 1; }
+
+if [ -z "$WS" ]; then
+  WS=$(herdr workspace list 2>/dev/null | jq -r '.result.workspaces[] | select(.focused) | .workspace_id' | head -1)
+fi
+[ -n "$WS" ] || { echo "herdr 서버를 찾지 못했습니다. herdr 실행 중인지 확인하세요." >&2; exit 1; }
+
+# 상태 파일은 워크스페이스 ID로 분리한다 — 스페이스마다 독립된 팀 설정이 남는다.
+STATE_DIR="$PROMPT_DIR/state"
+STATE_FILE="$STATE_DIR/$WS.json"
+
+# --status: 현재(또는 --workspace로 지정한) 워크스페이스의 에이전트만 보여준다.
+# herdr agent list에는 워크스페이스 필터가 없어 전역을 반환하므로 여기서 반드시 걸러낸다.
+if [ -n "$STATUS" ]; then
+  echo "workspace $WS"
+  herdr agent list | jq -r --arg ws "$WS" '.result.agents[]
+    | select(.workspace_id == $ws)
+    | "\(.agent_status)\t\(.name // "-")\t\(.pane_id)\t\(.terminal_title_stripped // "-")"' \
+    | column -t -s "$(printf '\t')"
+  exit 0
+fi
+
+# 프롬프트 파일은 /tmp에 두지 않는다 — macOS가 /var/folders를 주기적으로 비우는데,
+# herdr가 서버 재시작 후 에이전트를 resume하면 이 파일을 다시 읽어야 한다.
+mkdir -p "$PROMPT_DIR/.runs"
+RUN_DIR=$(mktemp -d "$PROMPT_DIR/.runs/XXXXXX")
+SPEC=""   # 팀 스펙 JSON 경로 (프리셋 또는 위키 분석 결과)
+
+# ── --reharness: 상태 파일에서 이 워크스페이스가 무슨 팀이었는지 복원 ──
+# 상태 파일은 워크스페이스 ID로 분리돼 있어 다른 스페이스의 설정이 섞이지 않는다.
+if [ -n "$REHARNESS" ] && [ -f "$STATE_FILE" ]; then
+  [ -n "$TEAM" ] || TEAM=$(jq -r '.team // ""' "$STATE_FILE")
+  [ -n "$CWD" ]  || CWD=$(jq -r '.cwd  // ""' "$STATE_FILE")
+  echo "상태 파일 로드: $STATE_FILE (team=${TEAM:-none})"
+fi
+
+# ── 팀 프리셋 ──
+if [ -n "$TEAM" ]; then
+  SPEC="$PROMPT_DIR/teams/$TEAM.json"
+  [ -f "$SPEC" ] || { echo "그런 팀 프리셋이 없습니다: $TEAM  (orch --list-teams 로 확인)" >&2; exit 1; }
+fi
+
+# ── 위키 분석 → 팀 구성 자동 결정 ──
+if [ -n "$WIKI" ]; then
+  [ -d "$WIKI" ] || { echo "위키 디렉토리가 없습니다: $WIKI" >&2; exit 1; }
+  WIKI_ABS=$(cd "$WIKI" && pwd)
+  echo "위키 분석 중: $WIKI_ABS  (수십 초 걸립니다)"
+  SPEC="$RUN_DIR/planned-team.json"
+  # shellcheck disable=SC2086  # PLANNER_CMD는 "claude" 같은 다단어 명령일 수 있어 분리 필요
+  $PLANNER_CMD --model "$LEAD_MODEL" --add-dir "$WIKI_ABS" \
+      --allowedTools 'Read,Glob,Grep' -p \
+      "$(cat "$PROMPT_DIR/planner.md")
+
+분석할 위키 디렉토리: $WIKI_ABS
+에이전트 수 희망값: $([ "$N_SET" = 1 ] && echo "$N" || echo '지정 없음 — 과제에 맞게 스스로 정할 것')" \
+    | sed -e 's/^```json$//' -e 's/^```$//' > "$SPEC.raw"
+  jq -e '.roles | length > 0' "$SPEC.raw" >/dev/null 2>&1 \
+    || { echo "위키 분석 결과가 올바른 JSON이 아닙니다. 원본: $SPEC.raw" >&2; exit 1; }
+  cp "$SPEC.raw" "$SPEC"
+  echo "편성안: $(jq -r '.name' "$SPEC") — $(jq -r '.rationale' "$SPEC")"
+  [ "$N_SET" = 1 ] || N=$(jq -r '.roles | length' "$SPEC")
+fi
+
+# 프리셋/편성안의 역할 수보다 N이 크면 N을 역할 수로 줄인다 (빈 역할 방지)
+if [ -n "$SPEC" ]; then
+  SPEC_ROLES=$(jq -r '.roles | length' "$SPEC")
+  [ "$N" -gt "$SPEC_ROLES" ] && N="$SPEC_ROLES"
+  # 프리셋이 작업 디렉토리를 지정했고 --cwd로 덮어쓰지 않았으면 그걸 쓴다
+  if [ -z "$CWD" ]; then CWD=$(jq -r '.cwd // ""' "$SPEC"); fi
+fi
+# ~ 확장 후 존재 확인
+if [ -n "$CWD" ]; then
+  CWD="${CWD/#\~/$HOME}"
+  [ -d "$CWD" ] || { echo "작업 디렉토리가 없습니다: $CWD" >&2; exit 1; }
+  CWD=$(cd "$CWD" && pwd)
+  TAB_CWD=(--cwd "$CWD")
+else
+  TAB_CWD=()
+fi
+
+# 통신 로그는 팀 작업 디렉토리에 둔다. --cwd가 없으면 orch를 실행한 위치.
+COMMS_LOG="${CWD:-$PWD}/comms/log.md"
+
+# 프로젝트의 현재 상태를 프롬프트에 싣는다 — CLAUDE.md(설정)와 최근 산출물(최신 데이터).
+# 하네스를 다시 세울 때 에이전트가 "지금 이 프로젝트가 어디까지 와 있는지"를 알고 시작하게 하는 것이 목적이다.
+project_context() { # 출력: 마크다운 조각
+  local base="${CWD:-$PWD}" f
+  [ -d "$base" ] || return 0
+  printf '\n---\n\n# 프로젝트 현재 상태 (하네스 생성 시점 스냅샷)\n\n'
+  printf '작업 디렉토리: `%s`\n' "$base"
+
+  # 1) CLAUDE.md — 루트 + 하위 (심볼릭 링크·노드모듈 제외, 최대 5개)
+  while IFS= read -r f; do
+    printf '\n## %s\n\n```markdown\n' "${f#$base/}"
+    # 너무 길면 잘라서 싣는다 — 원본은 파일로 읽으라고 안내한다
+    head -c 6000 "$f"
+    [ "$(wc -c < "$f")" -gt 6000 ] && printf '\n…(이하 생략 — 전문은 %s 를 직접 읽어라)\n' "$f"
+    printf '```\n'
+  done < <(find "$base" -maxdepth 3 -name 'CLAUDE.md' -type f \
+             -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null | head -5)
+
+  # 2) 최신 데이터 — 최근에 바뀐 산출물 목록. 내용이 아니라 "무엇이 있는지"만 준다.
+  # 기간으로 자르지 않는다 — 프로젝트가 며칠 쉬면 목록이 통째로 비어버린다.
+  # 최근 수정 순 40개를 날짜와 함께 준다.
+  printf '\n## 최근 산출물 (최근 수정 순 40개)\n\n```\n'
+  find "$base" -type f \( -name '*.md' -o -name '*.html' -o -name '*.json' -o -name '*.csv' -o -name '*.svg' \) \
+    -not -path '*/.git/*' -not -path '*/node_modules/*' -not -name 'CLAUDE.md' 2>/dev/null \
+    | while IFS= read -r f; do
+        # date -r FILE 은 GNU coreutils·BSD 모두 문서화돼 있지만, 없는 환경도 있으므로
+        # 실패하면 시각을 비우고 파일명만 남긴다 — 목록 자체가 사라지는 것보다 낫다.
+        ts=$(date -r "$f" '+%m-%d %H:%M' 2>/dev/null || echo '     -     ')
+        printf '%s\t%s\n' "$ts" "${f#$base/}"
+      done \
+    | sort -r | head -40
+  printf '```\n'
+  printf '\n위 목록은 파일명과 수정 시각뿐이다. 필요한 것은 직접 읽어라 — 추측하지 마라.\n'
+}
+
+# 팀 스펙에서 i번째(0-base) 역할의 필드를 꺼낸다. 배열이면 쉼표로 합친다.
+role_field() { # <idx0> <field>
+  [ -n "$SPEC" ] || { echo ""; return; }
+  jq -r --argjson i "$1" --arg f "$2" \
+    '(.roles[$i][$f] // "") | if type=="array" then join(", ") else . end' "$SPEC"
+}
+# 팀 전체에 적용할 가이드 + 역할별 추가 가이드
+guides_for() { # <idx0>
+  [ -n "$SPEC" ] || return 0
+  jq -r --argjson i "$1" '((.guides // []) + (.roles[$i].guides // [])) | unique[]' "$SPEC"
+}
+
+# pane split 후 새 pane_id 출력. ratio = 기존 팬이 유지하는 비율
+split() { # <pane_id> <right|down> <ratio>
+  herdr pane split "$1" --direction "$2" --ratio "$3" --no-focus | jq -r '.result.pane.pane_id'
+}
+
+# 만들어둔 프롬프트 파일로 팬에서 claude 실행
+start_claude() { # <pane_id> <name> <model> <prompt_file> <yolo_flag> [agent_slug]
+  herdr pane rename "$1" "$2" >/dev/null
+  # 신원은 프롬프트가 아니라 환경변수로 준다 — 프롬프트는 잊히거나 오염되지만 env는 그렇지 않다.
+  local ident="ORCH_ROLE='$2' ORCH_WS='$WS' ORCH_PANE='$1' ORCH_LOG='$COMMS_LOG'"
+  # 욜로 여부는 호출자가 정한다 — orch와 에이전트가 서로 다른 기본값을 갖기 때문.
+  local yolo="$5"
+  herdr pane run "$1" "$TEAMS_ENV $ident $CLAUDE_CMD --model '$3' $yolo --append-system-prompt \"\$(cat '$4')\""
+  # claude가 뜬 뒤 agent 이름도 등록한다.
+  # ⚠️ herdr 0.7.5부터 agent 이름은 [a-z][a-z0-9_-]{0,31} 만 허용된다(한글 거부).
+  # 그래서 팬 라벨은 한글 역할명, agent 이름은 영문 슬러그로 나눈다.
+  # 슬러그가 없으면 pane_id에서 만들어 최소한 등록은 되게 한다.
+  local slug="${6:-}"
+  [ -n "$slug" ] || slug=$(printf 'agent-%s' "${1//:/-}" | tr 'A-Z' 'a-z')
+  ( for _ in 1 2 3 4 5 6 7 8 9 10; do
+      sleep 3
+      herdr agent rename "$1" "$slug" >/dev/null 2>&1 && break
+    done ) &
+}
+
+# 에이전트 한 명의 시스템 프롬프트 파일을 만든다
+build_agent_prompt() { # <idx0> <name> <pane_id> <orch_pane> <out_file>
+  local i="$1" name="$2" pid="$3" orch="$4" out="$5" g v
+  {
+    cat "$PROMPT_DIR/agent.md"
+    if [ -n "$SPEC" ]; then
+      printf '\n---\n\n# 나의 역할: %s\n\n%s\n\n' "$name" "$(role_field "$i" brief)"
+      role_field "$i" prompt; echo
+      v=$(role_field "$i" mcp);      [ -n "$v" ] && printf '\n권장 MCP: %s\n' "$v"
+      v=$(role_field "$i" plugins);  [ -n "$v" ] && printf '권장 플러그인: %s\n' "$v"
+      v=$(role_field "$i" ref_agents); [ -n "$v" ] && printf '참고할 기존 서브에이전트 정의: %s\n' "$v"
+      v=$(role_field "$i" wiki_refs); [ -n "$v" ] && printf '먼저 읽을 위키 문서: %s\n' "$v"
+      printf '\n## 팀 전체 흐름\n%s\n' "$(jq -r '.flow // "(미정의)"' "$SPEC")"
+      for g in $(guides_for "$i"); do
+        [ -f "$PROMPT_DIR/guides/$g" ] && { printf '\n---\n\n'; cat "$PROMPT_DIR/guides/$g"; }
+      done
+    fi
+    if [ -f "$PROMPT_DIR/guides/comms.md" ]; then
+      printf '\n---\n\n'; cat "$PROMPT_DIR/guides/comms.md"
+    fi
+    project_context
+    printf '\n[컨텍스트] 나의_역할=%s 나의_pane=%s orch_pane=%s 나의_workspace=%s\n' "$name" "$pid" "$orch" "$WS"
+    printf '보고는 orch_pane(%s)에만 한다. 다른 워크스페이스의 팬에는 절대 보내지 마라.\n' "$orch"
+    if [ -n "$WIKI" ]; then printf '위키 디렉토리=%s\n' "$WIKI_ABS"; fi
+  } > "$out"
+}
+
+# 한 팬을 세로로 k등분해 위→아래 순서의 pane_id 목록 출력 (첫 줄은 원본 팬)
+split_rows() { # <pane_id> <k>
+  local cur="$1" k="$2" i ratio
+  echo "$cur"
+  for ((i = 1; i < k; i++)); do
+    ratio=$(awk "BEGIN{printf \"%.4f\", 1/($k-$i+1)}")
+    cur=$(split "$cur" down "$ratio")
+    echo "$cur"
+  done
+}
+
+# 탭 하나를 3x3 그리드로 분할, 열 우선 순서로 9개 pane_id 출력 (첫 인자는 루트 팬)
+split_grid_3x3() { # <root_pane_id>
+  local c1="$1" c2 c3 col
+  c2=$(split "$c1" right 0.3333)
+  c3=$(split "$c2" right 0.5)
+  for col in "$c1" "$c2" "$c3"; do
+    split_rows "$col" 3
+  done
+}
+
+# ══════════════════════════════════════════════════════════════
+# --reharness : 팀을 새로 만들지 않고, 지금 떠 있는 팬들의 하네스만 다시 세운다
+#   CLAUDE.md·가이드·팀 스펙을 다시 읽어 시스템 프롬프트를 재생성하고,
+#   각 팬을 --resume 으로 재기동해 대화 맥락은 유지한다.
+#   ⚠️ 오직 $WS 안에서만 동작한다. 다른 워크스페이스의 팬은 조회도 조작도 하지 않는다.
+# ══════════════════════════════════════════════════════════════
+if [ -n "$REHARNESS" ]; then
+  [ -n "$SPEC" ] || { echo "재구축하려면 팀 스펙이 필요합니다. --team 을 주거나 상태 파일이 있어야 합니다: $STATE_FILE" >&2; exit 1; }
+
+  # 이 워크스페이스의 팬 라벨 → pane_id (라벨은 서버 재시작에도 살아남는다)
+  PANES_JSON=$(herdr pane list --workspace "$WS" 2>/dev/null) \
+    || { echo "워크스페이스 $WS 의 팬 목록을 읽지 못했습니다." >&2; exit 1; }
+  # 이 워크스페이스의 에이전트 세션 (재개용)
+  AGENTS_JSON=$(herdr agent list 2>/dev/null || echo '{}')
+
+  pane_of_label() { # <label> → pane_id (없으면 빈 문자열). 반드시 $WS 안에서만 찾는다.
+    printf '%s' "$PANES_JSON" | jq -r --arg n "$1" \
+      '.result.panes[]? | select((.label // "") == $n) | .pane_id' | head -1
+  }
+  session_of_pane() { # <pane_id> → claude session id (없으면 빈 문자열)
+    printf '%s' "$AGENTS_JSON" | jq -r --arg ws "$WS" --arg p "$1" \
+      '.result.agents[]? | select(.workspace_id==$ws and .pane_id==$p)
+       | .agent_session.value // empty' | head -1
+  }
+
+  ORCH_PANE=$(pane_of_label orch)
+  [ -n "$ORCH_PANE" ] || { echo "워크스페이스 $WS 에서 'orch' 라벨의 팬을 찾지 못했습니다." >&2; exit 1; }
+
+  echo "workspace $WS 하네스 재구축${DRYRUN:+ (드라이런)}"
+  echo "  팀: $(jq -r '.name' "$SPEC")   작업 디렉토리: ${CWD:-$PWD}"
+
+  RH_PLAN=()   # "pane<TAB>label<TAB>slug<TAB>promptfile<TAB>model<TAB>yolo<TAB>session"
+
+  # orch 자신
+  OP="$RUN_DIR/orch.md"
+  {
+    cat "$PROMPT_DIR/orchestrator.md"
+    printf '\n---\n\n# 이번 팀: %s\n\n%s\n\n## 팀 전체 흐름\n%s\n' \
+      "$(jq -r '.name' "$SPEC")" "$(jq -r '.description // .rationale // ""' "$SPEC")" \
+      "$(jq -r '.flow // "(미정의)"' "$SPEC")"
+    if [ -f "$PROMPT_DIR/guides/comms.md" ]; then printf '\n---\n\n'; cat "$PROMPT_DIR/guides/comms.md"; fi
+    project_context
+    printf '\n[컨텍스트] 나의_역할=orch 나의_pane=%s 나의_workspace=%s\n' "$ORCH_PANE" "$WS"
+    printf '이 워크스페이스(%s) 밖의 팬/에이전트는 다른 팀의 것이다. 절대 건드리지 마라.\n' "$WS"
+    printf '\n※ 이 프롬프트는 하네스 재구축(%s)으로 갱신된 것이다. 대화 맥락은 이어지지만\n' "$(date '+%Y-%m-%d %H:%M')"
+    printf '  규칙·가이드·프로젝트 상태는 위 내용이 최신이다. 충돌하면 위를 따른다.\n'
+  } > "$OP"
+  RH_PLAN+=("$ORCH_PANE	orch	orch	$OP	$LEAD_MODEL	${LEAD_YOLO:--}	$(session_of_pane "$ORCH_PANE")")
+
+  # 팀 스펙의 역할 중, 이 워크스페이스에 같은 라벨의 팬이 실제로 있는 것만 대상으로 한다
+  ridx=0; RCOUNT=$(jq -r '.roles | length' "$SPEC")
+  while [ "$ridx" -lt "$RCOUNT" ]; do
+    rname=$(role_field "$ridx" name)
+    rslug=$(role_field "$ridx" en); [ -n "$rslug" ] || rslug="agent-$((ridx+1))"
+    rpane=$(pane_of_label "$rname")
+    if [ -n "$rpane" ]; then
+      build_agent_prompt "$ridx" "$rname" "$rpane" "$ORCH_PANE" "$RUN_DIR/agent-$ridx.md"
+      printf '\n※ 이 프롬프트는 하네스 재구축(%s)으로 갱신된 것이다. 규칙·가이드·프로젝트 상태는 위가 최신이다.\n' \
+        "$(date '+%Y-%m-%d %H:%M')" >> "$RUN_DIR/agent-$ridx.md"
+      RH_PLAN+=("$rpane	$rname	$rslug	$RUN_DIR/agent-$ridx.md	$MODEL	${AGENT_YOLO:--}	$(session_of_pane "$rpane")")
+    fi
+    ridx=$((ridx+1))
+  done
+
+  # 팀 스펙에 없는 팬도 빠뜨리지 않는다 — orch가 운영 중 추가한 역할들이 여기 걸린다.
+  # 역할별 프롬프트는 없으므로 공통 규칙 + 가이드 + 프로젝트 상태만 실어준다.
+  SPEC_LABELS=$(jq -r '.roles[].name' "$SPEC")
+  ei=0
+  while IFS= read -r lbl; do
+    [ -n "$lbl" ] || continue
+    [ "$lbl" = "orch" ] && continue
+    printf '%s\n' "$SPEC_LABELS" | grep -qxF "$lbl" && continue
+    epane=$(pane_of_label "$lbl")
+    [ -n "$epane" ] || continue
+    # 에이전트가 아닌 팬(빈 셸 등)은 건너뛴다
+    [ -n "$(session_of_pane "$epane")" ] || continue
+    ef="$RUN_DIR/extra-$ei.md"
+    {
+      cat "$PROMPT_DIR/agent.md"
+      printf '\n---\n\n# 나의 역할: %s\n\n' "$lbl"
+      printf '이 역할은 팀 프리셋에 없는 확장 역할이다. 지금까지 해온 일을 이어서 한다 —\n'
+      printf '기존 대화 맥락이 정본이고, 아래는 갱신된 공통 규칙·가이드·프로젝트 상태다.\n'
+      printf '\n## 팀 전체 흐름\n%s\n' "$(jq -r '.flow // "(미정의)"' "$SPEC")"
+      for g in $(jq -r '(.guides // [])[]' "$SPEC"); do
+        [ -f "$PROMPT_DIR/guides/$g" ] && { printf '\n---\n\n'; cat "$PROMPT_DIR/guides/$g"; }
+      done
+      [ -f "$PROMPT_DIR/guides/comms.md" ] && { printf '\n---\n\n'; cat "$PROMPT_DIR/guides/comms.md"; }
+      project_context
+      printf '\n[컨텍스트] 나의_역할=%s 나의_pane=%s orch_pane=%s 나의_workspace=%s\n' \
+        "$lbl" "$epane" "$ORCH_PANE" "$WS"
+      printf '보고는 orch_pane(%s)에만 한다. 다른 워크스페이스의 팬에는 절대 보내지 마라.\n' "$ORCH_PANE"
+      printf '\n※ 하네스 재구축(%s)으로 갱신됨. 규칙·가이드·프로젝트 상태는 위가 최신이다.\n' "$(date '+%Y-%m-%d %H:%M')"
+    } > "$ef"
+    eslug=$(printf '%s' "$lbl" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-')
+    [ -n "$eslug" ] || eslug="extra-$ei"
+    case "$eslug" in [a-z]*) ;; *) eslug="x-$eslug" ;; esac
+    RH_PLAN+=("$epane	$lbl	$eslug	$ef	$MODEL	${AGENT_YOLO:--}	$(session_of_pane "$epane")")
+    ei=$((ei+1))
+  done < <(printf '%s' "$PANES_JSON" | jq -r '.result.panes[]? | .label // empty')
+
+  # 계획 출력
+  printf '\n%-10s %-14s %-10s %s\n' "PANE" "역할" "재개" "프롬프트"
+  for row in "${RH_PLAN[@]}"; do
+    IFS=$'\t' read -r p n s f m y sess <<< "$row"
+    # 안전장치: 대상이 $WS 소속인지 매번 확인한다
+    case "$p" in "$WS":*) ;; *) echo "경계 위반으로 중단: $p 는 $WS 소속이 아닙니다" >&2; exit 1 ;; esac
+    if [ -n "$sess" ]; then rs="resume"; else rs="신규"; fi
+    printf '%-10s %-14s %-8s %s\n' "$p" "$n" "$rs" "$(basename "$f")"
+  done
+
+  if [ -n "$DRYRUN" ]; then
+    echo
+    echo "드라이런입니다. 팬은 건드리지 않았습니다. 프롬프트: $RUN_DIR"
+    exit 0
+  fi
+
+  echo
+  for row in "${RH_PLAN[@]}"; do
+    IFS=$'\t' read -r p n s f m y sess <<< "$row"
+    [ "$y" = "-" ] && y=""
+    ident="ORCH_ROLE='$n' ORCH_WS='$WS' ORCH_PANE='$p' ORCH_LOG='$COMMS_LOG'"
+    resume=""; [ -n "$sess" ] && resume="--resume $sess"
+    # 실행 중인 claude를 정리하고 새 프롬프트로 재기동한다
+    herdr pane send-keys "$p" ctrl+c >/dev/null 2>&1 || true
+    sleep 1
+    herdr pane run "$p" "cd '${CWD:-$PWD}' && $TEAMS_ENV $ident $CLAUDE_CMD --model '$m' $y $resume --append-system-prompt \"\$(cat '$f')\""
+    ( for _ in 1 2 3 4 5 6 7 8; do sleep 3; herdr agent rename "$p" "$s" >/dev/null 2>&1 && break; done ) &
+    echo "  ↻ $p  $n"
+  done
+
+  wait
+  echo
+  echo "재구축 완료: ${#RH_PLAN[@]}개 팬 (workspace $WS 한정)"
+  echo "프롬프트: $RUN_DIR"
+  exit 0
+fi
+
+echo "workspace $WS 에 orch 팀 생성 중 (에이전트 ${N}개)..."
+
+# ── 탭 1: orch(좌 50%) + 에이전트 최대 4개(우 50%, 가로 스택) ──
+TAB1=$(herdr tab create --workspace "$WS" --label orch "${TAB_CWD[@]+"${TAB_CWD[@]}"}" --focus)
+ORCH_PANE=$(echo "$TAB1" | jq -r '.result.root_pane.pane_id')
+[ -n "$ORCH_PANE" ] && [ "$ORCH_PANE" != null ] || { echo "탭 생성 실패: $TAB1" >&2; exit 1; }
+
+RIGHT=$(split "$ORCH_PANE" right 0.5)
+FIRST=$(( N < 4 ? N : 4 ))
+AGENT_PANES=()
+while IFS= read -r pid; do AGENT_PANES+=("$pid"); done < <(split_rows "$RIGHT" "$FIRST")
+
+# ── 초과분: 9개 단위로 3x3 탭 추가 (빈 칸은 셸로 남는 표준 스켈레톤) ──
+REMAIN=$(( N - FIRST ))
+TAB_NO=2
+while [ "$REMAIN" -gt 0 ]; do
+  TABJ=$(herdr tab create --workspace "$WS" --label "agents-$TAB_NO" "${TAB_CWD[@]+"${TAB_CWD[@]}"}" --no-focus)
+  ROOT=$(echo "$TABJ" | jq -r '.result.root_pane.pane_id')
+  FILL=$(( REMAIN < 9 ? REMAIN : 9 ))
+  i=0
+  while IFS= read -r pid; do
+    if [ "$i" -lt "$FILL" ]; then AGENT_PANES+=("$pid"); fi
+    i=$((i + 1))
+  done < <(split_grid_3x3 "$ROOT")
+  REMAIN=$(( REMAIN - FILL ))
+  TAB_NO=$(( TAB_NO + 1 ))
+done
+
+# ── 오케스트레이터 프롬프트 ──
+OP="$RUN_DIR/orch.md"
+{
+  cat "$PROMPT_DIR/orchestrator.md"
+  if [ -n "$SPEC" ]; then
+    printf '\n---\n\n# 이번 팀: %s\n\n%s\n\n## 팀 전체 흐름\n%s\n\n## 팀원\n' \
+      "$(jq -r '.name' "$SPEC")" "$(jq -r '.description // .rationale // ""' "$SPEC")" \
+      "$(jq -r '.flow // "(미정의)"' "$SPEC")"
+    i=0
+    while [ "$i" -lt "$N" ]; do
+      printf -- '- %s (%s) — %s\n' "$(role_field $i name)" "${AGENT_PANES[i]}" "$(role_field $i brief)"
+      i=$((i + 1))
+    done
+    UNUSED=$(jq -r --argjson n "$N" '.roles[$n:][]?.name' "$SPEC" | paste -sd, -)
+    if [ -n "$UNUSED" ]; then printf '\n아직 안 뽑은 역할(필요하면 추가 가능): %s\n' "$UNUSED"; fi
+  fi
+  if [ -f "$PROMPT_DIR/guides/comms.md" ]; then
+    printf '\n---\n\n'; cat "$PROMPT_DIR/guides/comms.md"
+  fi
+  project_context
+  printf '\n[컨텍스트] 나의_역할=orch 나의_pane=%s 나의_workspace=%s\n' "$ORCH_PANE" "$WS"
+  printf '이 워크스페이스(%s) 밖의 팬/에이전트는 다른 팀의 것이다. 절대 건드리지 마라.\n' "$WS"
+  if [ -n "$WIKI" ]; then printf '위키 디렉토리=%s\n' "$WIKI_ABS"; fi
+  if [ -n "$SPEC" ]; then printf '팀 스펙 파일=%s\n' "$SPEC"; fi
+} > "$OP"
+start_claude "$ORCH_PANE" orch "$LEAD_MODEL" "$OP" "$LEAD_YOLO"
+
+# ── 에이전트 실행 ──
+idx=0
+for pid in "${AGENT_PANES[@]}"; do
+  name="${ROLES[idx]:-$(role_field $idx name)}"
+  [ -n "$name" ] || name="agent-$((idx + 1))"
+  # 팀 프리셋의 en 슬러그를 agent 이름으로 쓴다 (herdr 0.7.5 이름 제약 대응)
+  slug=$(role_field "$idx" en)
+  [ -n "$slug" ] || slug="agent-$((idx + 1))"
+  build_agent_prompt "$idx" "$name" "$pid" "$ORCH_PANE" "$RUN_DIR/agent-$idx.md"
+  start_claude "$pid" "$name" "$MODEL" "$RUN_DIR/agent-$idx.md" "$AGENT_YOLO" "$slug"
+  idx=$(( idx + 1 ))
+done
+
+# ── 상태 저장 ──
+# --reharness 가 나중에 "이 워크스페이스가 무슨 팀이었는지"를 알아야 하므로 기록한다.
+# 워크스페이스 ID를 파일명으로 쓰므로 스페이스별로 완전히 분리된다.
+mkdir -p "$STATE_DIR"
+{
+  printf '{\n  "workspace": "%s",\n  "team": "%s",\n  "cwd": "%s",\n' \
+    "$WS" "${TEAM:-}" "${CWD:-$PWD}"
+  printf '  "spec": "%s",\n  "orch_pane": "%s",\n  "model": "%s",\n  "lead_model": "%s",\n' \
+    "${SPEC:-}" "$ORCH_PANE" "$MODEL" "$LEAD_MODEL"
+  printf '  "created": "%s",\n  "roles": [\n' "$(date '+%Y-%m-%dT%H:%M:%S')"
+  i=0
+  for pid in "${AGENT_PANES[@]}"; do
+    nm="${ROLES[i]:-$(role_field $i name)}"; [ -n "$nm" ] || nm="agent-$((i+1))"
+    sg=$(role_field "$i" en); [ -n "$sg" ] || sg="agent-$((i+1))"
+    [ "$i" -gt 0 ] && printf ',\n'
+    printf '    {"idx": %d, "name": "%s", "slug": "%s", "pane": "%s"}' "$i" "$nm" "$sg" "$pid"
+    i=$((i+1))
+  done
+  printf '\n  ]\n}\n'
+} > "$STATE_FILE"
+
+echo "완료: orch=$ORCH_PANE, 에이전트 ${#AGENT_PANES[@]}개"
+echo "프롬프트: $RUN_DIR"
+echo "상태: $STATE_FILE  (orch --reharness 로 하네스 재구축 가능)"

@@ -1,0 +1,6 @@
+# 실행 중 생성되는 것 — 개인 정보가 들어갈 수 있으므로 커밋 금지
+.runs/
+state/
+comms/
+*.bak
+.DS_Store
