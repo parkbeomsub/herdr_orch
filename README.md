@@ -128,6 +128,7 @@ Anthropic 공식 자료 기준 **멀티에이전트는 일반 채팅 대비 약 
 ## 문서
 
 - [INSTALL.md](INSTALL.md) — OS별 설치 (Windows·Linux·macOS)
+- [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) — 단축키 설정 + 터미널별 함정
 - [docs/TEAMS.md](docs/TEAMS.md) — 팀 프리셋 스키마
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — 안 될 때
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 어떻게 도는가

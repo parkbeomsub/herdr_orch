@@ -1,0 +1,58 @@
+# herdr configuration
+# 기본값에서 변경한 항목만 명시. 전체 옵션: `herdr --default-config`
+
+# 첫 실행 온보딩 화면 비활성화 (알림 설정은 아래에서 직접 지정)
+onboarding = false
+
+[keys]
+# prefix를 ctrl+b 대신 ctrl+a로 (GNU screen 스타일)
+prefix = "ctrl+a"
+
+# 화면 분할: -(위아래), \(좌우)
+split_horizontal = "prefix+minus"
+split_vertical = "prefix+backslash"
+
+# 팬 종료 (기본값과 동일하지만 명시)
+close_pane = "prefix+x"
+
+# 생성: 워크스페이스 = prefix+n, 탭 = prefix+t
+new_workspace = "prefix+n"
+new_tab = "prefix+t"
+
+# 이름 변경: 워크스페이스 = prefix+shift+i, 탭 = prefix+shift+t, 팬 = prefix+shift+n
+# 팬은 기본 prefix+shift+p 대신 prefix+shift+n 사용.
+# prefix+shift+n은 herdr 기본값에서 new_workspace였으나 위에서 prefix+n으로 옮겼으므로 비어 있음.
+rename_workspace = "prefix+shift+i"
+rename_tab = "prefix+shift+t"
+rename_pane = "prefix+shift+n"
+
+# 워크스페이스 위/아래 이동 — ctrl+shift+↑/↓
+previous_workspace = "ctrl+shift+up"
+next_workspace = "ctrl+shift+down"
+
+# 탭 이동 — ctrl+shift+←/→ (기본 next_tab=prefix+n이 워크스페이스 생성과 충돌해 이동)
+previous_tab = "ctrl+shift+left"
+next_tab = "ctrl+shift+right"
+
+# 팬 이동: ctrl + 방향키
+# iTerm2가 "Option Key Sends = Normal"이라 Option이 낀 조합은 별개 키로 전송되지 않는다.
+# (Option+←/→는 단어이동 b/f로 가로채이고, Ctrl+Option+←는 그냥 Ctrl+←가 됨)
+# iTerm2가 CSI로 확실히 보내주는 건 shift/ctrl/ctrl+shift+방향키뿐이라 ctrl+방향키를 쓴다.
+focus_pane_left = "ctrl+left"
+focus_pane_down = "ctrl+down"
+focus_pane_up = "ctrl+up"
+focus_pane_right = "ctrl+right"
+
+[ui.toast]
+# 백그라운드 워크스페이스에서 에이전트가 완료/입력 대기 상태가 되면 인앱 토스트 표시
+delivery = "herdr"
+
+[experimental]
+# 한글 입력 상태에서도 prefix(ctrl+b) 명령이 동작하도록,
+# prefix 모드 동안 영문 자판으로 자동 전환 후 복원 (macOS 전용)
+switch_ascii_input_source_in_prefix = true
+
+# Claude Code처럼 자체 커서를 그리는 TUI에서
+# 한글 조합 후보창이 커서 위치를 따라오도록 커서를 외부 터미널에 노출
+reveal_hidden_cursor_for_cjk_ime = true
+cjk_ime_agents = ["claude"]

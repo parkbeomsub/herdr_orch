@@ -134,6 +134,22 @@ cd orch-kit && ./install.sh
 
 ---
 
+## 단축키 설정
+
+herdr 기본값은 tmux 스타일(`Ctrl+B` prefix)입니다.
+에이전트를 여러 개 오가려면 **이동 키를 prefix 없이** 쓰는 편이 훨씬 빠릅니다.
+
+```bash
+cp ~/.config/herdr/config.toml ~/.config/herdr/config.toml.bak 2>/dev/null
+cp config/herdr-config.toml ~/.config/herdr/config.toml
+herdr config check && herdr server reload-config
+```
+
+**터미널이 키를 가로채는 경우가 많습니다.** 안 먹히면 `cat -v`로 무엇이 전달되는지 먼저 보세요.
+OS·터미널별 함정은 [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md)에 정리했습니다.
+
+---
+
 ## 설치 확인
 
 ```bash
