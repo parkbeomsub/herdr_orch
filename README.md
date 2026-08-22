@@ -13,8 +13,9 @@ orch --reharness           # 규칙을 바꿨다 → 대화는 유지한 채 하
 orch --stop                # 이 스페이스의 팀 정리
 ```
 
-<!-- 데모 GIF를 여기에: 15~30초, 5MB 이하 -->
-<!-- ![demo](docs/demo.gif) -->
+![demo](docs/demo.gif)
+
+<sub>위 GIF는 [`docs/demo.tape`](docs/demo.tape)로 렌더링됩니다 — `brew install vhs && vhs docs/demo.tape`</sub>
 
 ---
 
