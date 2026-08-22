@@ -41,8 +41,8 @@ orch --reharness           # 규칙을 바꿨다 → 대화는 유지한 채 하
 ## 설치
 
 ```bash
-git clone https://github.com/<당신>/orch-kit.git
-cd orch-kit
+git clone https://github.com/parkbeomsub/herdr_orch.git
+cd herdr_orch
 ./install.sh
 ```
 

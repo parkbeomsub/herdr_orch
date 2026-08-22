@@ -37,8 +37,8 @@ brew install jq
 # 3) Claude Code — https://claude.com/claude-code 참조
 
 # 4) orch
-git clone https://github.com/<당신>/orch-kit.git
-cd orch-kit
+git clone https://github.com/parkbeomsub/herdr_orch.git
+cd herdr_orch
 ./install.sh
 ```
 
@@ -71,8 +71,8 @@ sudo pacman -S jq          # Arch
 # 3) Claude Code — https://claude.com/claude-code 참조
 
 # 4) orch
-git clone https://github.com/<당신>/orch-kit.git
-cd orch-kit
+git clone https://github.com/parkbeomsub/herdr_orch.git
+cd herdr_orch
 ./install.sh
 ```
 
@@ -110,8 +110,8 @@ wsl --install -d Ubuntu
 ```bash
 curl -fsSL https://herdr.dev/install.sh | sh
 sudo apt update && sudo apt install -y jq git
-git clone https://github.com/<당신>/orch-kit.git
-cd orch-kit && ./install.sh
+git clone https://github.com/parkbeomsub/herdr_orch.git
+cd herdr_orch && ./install.sh
 ```
 
 **WSL 사용 시 주의:**
