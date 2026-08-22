@@ -5,6 +5,7 @@
 
 ```bash
 orch 4 --team dev          # 개발팀 4명 (PM·테크리드·디자이너·풀스택)
+orch 4 --agent codex       # Claude Code 대신 Codex로
 orch --status              # 누가 일하고 누가 막혔는지
 orch --reharness           # 규칙을 바꿨다 → 대화는 유지한 채 하네스만 재구축
 ```
@@ -82,10 +83,35 @@ orch 4 --team dev --cwd ~/myproject   # 개발팀 4명을 내 프로젝트에서
 ## 위키를 주면 팀을 짜줍니다
 
 ```bash
-orch --wiki ~/myproject/docs
+orch --wiki ~/myproject/docs                    # 한 곳
+orch --wiki ~/docs --wiki ~/specs               # 여러 곳
+orch --wiki ~/docs,~/specs,~/rfcs               # 쉼표도 가능
 ```
 
-헤드리스 claude가 문서를 읽고 **이 프로젝트에 맞는 역할 구성을 JSON으로 뽑은 뒤** 그대로 팬을 만듭니다. 프리셋 하나에 안 맞으면 혼합 구성을 짭니다.
+헤드리스 claude가 문서를 읽고 **이 프로젝트에 맞는 역할 구성을 JSON으로 뽑은 뒤** 그대로 팬을 만듭니다. 프리셋 하나에 안 맞으면 혼합 구성을 짭니다. 경로를 여러 개 주면 전부 훑습니다.
+
+## Claude Code / Codex 둘 다 됩니다
+
+```bash
+orch 4 --team dev --agent codex
+ORCH_AGENT=codex orch 4 --team dev     # 기본값으로 고정
+```
+
+두 CLI는 프롬프트 주입 방식이 근본적으로 다릅니다.
+
+| | Claude Code | Codex |
+|---|---|---|
+| 시스템 프롬프트 | `--append-system-prompt` | **플래그 없음** — `AGENTS.md` 파일만 읽음 |
+| 권한 우회 | `--dangerously-skip-permissions` | `--full-auto` |
+| 재개 | `claude --resume <id>` | `codex resume <id>` |
+
+Codex는 시스템 프롬프트 플래그가 없어서, 역할 지시문을 **`<cwd>/.orch/<역할>.md`에 두고 첫 메시지로 전달**합니다. 공용 `AGENTS.md`를 덮어쓰면 팬끼리 충돌하므로 역할별 파일을 따로 둡니다. 대화가 길어져도 에이전트가 그 파일을 다시 읽을 수 있습니다.
+
+Codex 상태를 herdr 사이드바에 표시하려면 한 번만:
+
+```bash
+herdr integration install codex
+```
 
 ## 에이전트 간 통신
 
