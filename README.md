@@ -131,6 +131,78 @@ Codex 상태를 herdr 사이드바에 표시하려면 한 번만:
 herdr integration install codex
 ```
 
+## 단축키 — 팬·탭·스페이스 오가기
+
+에이전트가 여러 개면 **이동이 가장 잦은 동작**입니다. 그래서 이동은 prefix 없이 바로,
+가끔 쓰는 생성·이름변경은 prefix를 거치게 배치했습니다.
+
+```bash
+cp config/herdr-config.toml ~/.config/herdr/config.toml
+herdr config check && herdr server reload-config     # ← 리로드해야 적용됩니다
+```
+
+prefix는 **`Ctrl+A`** 입니다 (GNU screen 스타일). 누르고 **뗀 뒤** 다음 키를 칩니다.
+
+### 이동 — prefix 없이
+
+| 대상 | 키 | 비고 |
+|---|---|---|
+| **팬** | `Ctrl` + `← ↑ ↓ →` | 수식키 하나. 가장 자주 씀 |
+| **탭** | `Ctrl`+`Shift` + `← →` | 좌우 = 탭 |
+| **스페이스**(워크스페이스) | `Ctrl`+`Shift` + `↑ ↓` | 상하 = 스페이스 |
+
+방향이 일관됩니다 — **좌우는 탭, 상하는 스페이스**, 수식키가 하나면 팬입니다.
+
+### 생성
+
+| 대상 | 키 |
+|---|---|
+| 스페이스 | `Ctrl+A` `N` |
+| 탭 | `Ctrl+A` `T` |
+| 팬 — 위아래 분할 | `Ctrl+A` `-` |
+| 팬 — 좌우 분할 | `Ctrl+A` `\` |
+
+### 이름 변경
+
+| 대상 | 키 |
+|---|---|
+| 스페이스 | `Ctrl+A` `Shift+I` |
+| 탭 | `Ctrl+A` `Shift+T` |
+| 팬 | `Ctrl+A` `Shift+N` |
+
+> 팬 이름은 `orch-msg`가 대상을 찾는 **주소**입니다. 역할을 바꾸면 이름도 바꾸세요.
+> 단축키로 바꾸면 herdr 내부의 `agent` 이름은 안 따라오므로, 역할 재배정이라면
+> `herdr agent rename <pane_id> <영문슬러그>` 도 함께 하세요.
+
+### 그 밖
+
+| 동작 | 키 |
+|---|---|
+| 팬 닫기 | `Ctrl+A` `X` |
+| 팬 확대/축소 | `Ctrl+A` `Z` |
+| 사이드바 토글 | `Ctrl+A` `B` |
+| 설정 열기 | `Ctrl+A` `S` |
+| 디태치 (세션은 유지) | `Ctrl+A` `Q` |
+
+### ⚠️ 안 먹히면 herdr가 아니라 터미널 문제입니다
+
+터미널이 키를 먼저 가로채면 herdr까지 도달하지 않습니다. **무엇이 전달되는지 먼저 보세요:**
+
+```bash
+cat -v      # 키를 누르면 herdr가 받는 값이 그대로 찍힙니다. Ctrl+C 로 종료
+```
+
+| 출력 | 의미 |
+|---|---|
+| `^[[1;5D` | Ctrl+Left — 정상 전달 |
+| `^[b` | **단어 이동으로 가로채짐** — 그 조합은 못 씀 |
+| `^[[D` | 수식키가 무시됨 |
+| (아무것도 없음) | OS·윈도우 매니저가 먹음 |
+
+대표적인 함정 — iTerm2는 `Option+←/→`를 단어 이동으로 매핑해두고, `Option Key Sends = Normal`이면
+**Option이 낀 조합 전체가 전송되지 않습니다.** GNOME은 `Ctrl+Alt+←/→`를 데스크톱 워크스페이스 전환에
+선점합니다. OS·터미널별 해결법은 [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md)에 정리했습니다.
+
 ## 에이전트 간 통신
 
 ```bash
@@ -172,7 +244,7 @@ Anthropic 공식 자료 기준 **멀티에이전트는 일반 채팅 대비 약 
 ## 문서
 
 - [INSTALL.md](INSTALL.md) — OS별 설치 (Windows·Linux·macOS)
-- [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) — 단축키 설정 + 터미널별 함정
+- [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) — 단축키 전체 + OS·터미널별 함정 해결
 - [docs/TEAMS.md](docs/TEAMS.md) — 팀 프리셋 스키마
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — 안 될 때
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 어떻게 도는가
