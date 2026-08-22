@@ -13,6 +13,8 @@
 #   orch --list-teams        사용 가능한 팀 프리셋 목록
 #   orch --show TEAM         팀에 어떤 역할이 있는지 미리 본다 (띄우기 전에 확인)
 #   orch --stop              이 워크스페이스의 orch 팀을 정리한다 (--force 로 확인 생략)
+#   orch --doctor            설치·설정·권한·PATH 를 한 번에 점검한다
+#   orch --new-team SLUG     팀 프리셋을 대화형으로 만든다 (--ai 로 지시문 초안까지 생성)
 #   orch [N] --workspace ID  특정 워크스페이스에 생성 (기본: 현재 포커스된 워크스페이스)
 #   orch [N] --cwd DIR          에이전트 작업 디렉토리 (기본: 현재 위치)
 #   orch [N] --yolo             orch 팬까지 권한 확인 없이 실행 (에이전트는 기본이 이미 yolo)
@@ -77,6 +79,9 @@ DRYRUN=""
 SHOW_TEAM=""
 STOP=""
 FORCE=""
+DOCTOR=""
+NEWTEAM=""
+NEWTEAM_AI=""
 # Agent Teams(실험 기능)는 orch가 띄우는 팬에서만 켠다. 전역 settings.json을 건드리지 않으므로
 # 수동 운영 중인 다른 워크스페이스는 영향받지 않는다. --no-teams로 끌 수 있다.
 TEAMS_ENV="CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
@@ -112,7 +117,10 @@ while [ $# -gt 0 ]; do
       exit 0 ;;
     --show) SHOW_TEAM="$2"; shift 2 ;;
     --stop) STOP=1; shift ;;
-    -h|--help) sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --doctor) DOCTOR=1; shift ;;
+    --new-team) NEWTEAM="${2:-}"; [ -n "${2:-}" ] && shift 2 || shift ;;
+    --ai) NEWTEAM_AI=1; shift ;;
+    -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) N="$1"; N_SET=1; shift ;;
   esac
 done
@@ -125,24 +133,6 @@ if [ "${#ROLES[@]}" -gt 0 ] && [ -n "$TEAM" ]; then
 fi
 case "$N" in (*[!0-9]*|'') echo "에이전트 수는 숫자여야 합니다: $N" >&2; exit 1 ;; esac
 [ "$N" -ge 1 ] || { echo "에이전트는 최소 1개 필요합니다" >&2; exit 1; }
-
-# ── --show: 팀을 띄우기 전에 무엇이 들어 있는지 본다 ──
-if [ -n "$SHOW_TEAM" ]; then
-  f="$PROMPT_DIR/teams/$SHOW_TEAM.json"
-  [ -f "$f" ] || { echo "그런 팀이 없습니다: $SHOW_TEAM  (orch --list-teams)" >&2; exit 1; }
-  jq -e . "$f" >/dev/null 2>&1 || { echo "JSON 문법 오류: $f" >&2; jq . "$f"; exit 1; }
-  jq -r '
-    "\(.name)   [\(.roles|length)개 역할]",
-    (if .cwd then "작업 디렉토리: \(.cwd)" else empty end),
-    (if .description then "\n\(.description)" else empty end),
-    (if .flow then "\n흐름: \(.flow)" else empty end),
-    "\n순서 = N명 뽑을 때 우선순위\n",
-    (.roles | to_entries[] |
-      "\(.key+1|tostring|(" "*(2-length))+.)  \(.value.name)  (\(.value.en // "en없음"))\n     \(.value.brief // "brief없음")" +
-      (if (.value.mcp // []) | length > 0 then "\n     MCP: \((.value.mcp)|join(", "))" else "" end))
-  ' "$f"
-  exit 0
-fi
 
 # ── 팀 스펙 검증 — 빠진 필드를 조용히 넘기지 않는다 ──
 # prompt가 없으면 에이전트가 역할 지시 없이 뜨는데, 겉보기엔 정상이라 알아채기 어렵다.
@@ -169,6 +159,256 @@ validate_spec() { # <spec.json>
   done
   return $bad
 }
+
+# ── --doctor: 설치 직후 "왜 안 되지"를 없앤다 ──
+# herdr 서버가 없어도 돌아야 하므로 워크스페이스 확인보다 앞에 둔다.
+if [ -n "$DOCTOR" ]; then
+  ok=0; warn=0; bad=0
+  _ok()   { printf '  ✅ %s\n' "$*"; ok=$((ok+1)); }
+  _warn() { printf '  ⚠️  %s\n' "$*"; warn=$((warn+1)); }
+  _bad()  { printf '  ❌ %s\n' "$*"; bad=$((bad+1)); }
+
+  echo "orch 진단"
+  echo
+  echo "[1] 필수 명령"
+  for c in herdr jq; do
+    if command -v "$c" >/dev/null 2>&1; then _ok "$c  $(command -v "$c")"
+    else _bad "$c 없음 — INSTALL.md 참조"; fi
+  done
+  if command -v claude >/dev/null 2>&1; then _ok "claude  $(claude --version 2>/dev/null | head -1)"
+  else _warn "claude 없음 (--agent codex 만 쓸 거면 무관)"; fi
+  if command -v codex >/dev/null 2>&1; then _ok "codex  $(codex --version 2>/dev/null | head -1)"
+  else _warn "codex 없음 (--agent codex 를 쓰려면 필요)"; fi
+  printf '  ℹ️  bash %s\n' "$BASH_VERSION"
+
+  echo
+  echo "[2] herdr"
+  if command -v herdr >/dev/null 2>&1; then
+    _hv=$(herdr --version 2>/dev/null | awk '{print $2}')
+    _sv=$(herdr status server 2>/dev/null | awk -F': ' '/^version/{print $2}')
+    _compat=$(herdr status server 2>/dev/null | awk -F': ' '/^compatible/{print $2}')
+    if [ -z "$_sv" ]; then
+      _warn "서버가 안 돌고 있습니다 — herdr 를 실행한 뒤 그 팬 안에서 orch 를 쓰세요"
+    elif [ "$_hv" != "$_sv" ]; then
+      _bad "CLI $_hv vs 서버 $_sv 불일치 (compatible=$_compat)"
+      printf '        herdr 밖 터미널에서: HERDR_SOCKET_PATH=%s herdr server stop && herdr\n' \
+        "${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
+    else _ok "CLI·서버 모두 $_hv"; fi
+    if [ -n "${HERDR_WORKSPACE_ID:-}" ]; then _ok "herdr 팬 안에서 실행 중 ($HERDR_WORKSPACE_ID / ${HERDR_PANE_ID:-?})"
+    else _warn "herdr 팬 밖입니다 — orch-msg 는 팬 안에서만 신원을 얻습니다"; fi
+    _int=$(herdr integration status 2>/dev/null | grep -E '^(claude|codex):' || true)
+    [ -n "$_int" ] && printf '%s\n' "$_int" | sed 's/^/  ℹ️  통합 /'
+    printf '%s' "$_int" | grep -q '^claude: current' \
+      || _warn "claude 통합 미설치 — 사이드바 상태가 안 뜹니다: herdr integration install claude"
+  fi
+
+  echo
+  echo "[3] 설정 파일"
+  [ -d "$PROMPT_DIR" ] && _ok "$PROMPT_DIR" || _bad "$PROMPT_DIR 없음 — install.sh 를 돌리세요"
+  for f in orchestrator.md agent.md; do
+    [ -f "$PROMPT_DIR/$f" ] && _ok "$f" || _bad "$f 없음"
+  done
+  _tn=0; _tbad=0
+  for f in "$PROMPT_DIR"/teams/*.json; do
+    [ -f "$f" ] || continue
+    _tn=$((_tn+1))
+    validate_spec "$f" >/dev/null 2>&1 || { _tbad=$((_tbad+1)); printf '  ❌ 팀 %s — orch --show %s 로 확인\n' "$(basename "$f" .json)" "$(basename "$f" .json)"; }
+  done
+  [ "$_tbad" -eq 0 ] && _ok "팀 프리셋 ${_tn}개 전부 유효" || bad=$((bad+_tbad))
+  if [ -f "$HOME/.config/herdr/config.toml" ]; then
+    herdr config check >/dev/null 2>&1 && _ok "herdr config.toml 유효" || _bad "herdr config.toml 오류 — herdr config check"
+  fi
+
+  echo
+  echo "[4] 권한 (에이전트가 herdr 명령을 쓸 수 있는가)"
+  _s="$HOME/.claude/settings.json"
+  if [ -f "$_s" ] && command -v python3 >/dev/null 2>&1; then
+    _have=$(python3 -c "
+import json,sys
+try: d=json.load(open('$_s'))
+except Exception: print('ERR'); sys.exit()
+a=d.get('permissions',{}).get('allow',[])
+need=['Bash(herdr agent send:*)','Bash(herdr pane send-keys:*)','Bash(herdr agent list)']
+print(sum(1 for n in need if n in a), len(need))
+" 2>/dev/null)
+    case "$_have" in
+      "3 3") _ok "핵심 통신 명령 허용됨" ;;
+      ERR|"") _warn "settings.json 을 읽지 못했습니다" ;;
+      *) _warn "통신 명령 허용이 부족합니다 ($_have) — docs/PERMISSIONS.md" ;;
+    esac
+    python3 -c "
+import json
+d=json.load(open('$_s'))
+a=d.get('permissions',{}).get('allow',[])
+risky=[x for x in a if 'pane run' in x or 'pane close' in x or 'workspace close' in x]
+print('RISK' if risky else 'SAFE')" 2>/dev/null | grep -q RISK \
+      && _warn "pane run/close 가 허용돼 있습니다 — 임의 명령 실행 우회가 가능해집니다"
+  else
+    _warn "$_s 없음 — 에이전트가 매번 승인을 물어 오케스트레이션이 멈춥니다"
+  fi
+
+  echo
+  echo "[5] PATH"
+  for c in orch orch-msg; do
+    _p=$(command -v "$c" 2>/dev/null) && _ok "$c  $_p" || _bad "$c 가 PATH에 없습니다"
+  done
+
+  echo
+  printf '결과: 정상 %d · 주의 %d · 문제 %d\n' "$ok" "$warn" "$bad"
+  [ "$bad" -eq 0 ] || { echo "❌ 표시부터 해결하세요. docs/TROUBLESHOOTING.md"; exit 1; }
+  [ "$warn" -eq 0 ] && echo "바로 쓸 수 있습니다:  orch 4 --team dev"
+  exit 0
+fi
+
+# ── --new-team: 팀 프리셋을 대화형으로 만든다 ──
+# JSON을 손으로 쓰다 en 슬러그나 prompt를 빠뜨리는 게 가장 흔한 실수라, 물어보고 채워준다.
+if [ -n "${NEWTEAM:-}" ]; then
+  # stdin 에서 읽는다 — /dev/tty 를 강제하면 파이프로 답을 주입할 수 없어
+  # 스크립트화도 테스트도 불가능해진다. 프롬프트는 stderr로 내보내 출력과 섞이지 않게 한다.
+  ask() { # <프롬프트> <기본값>  → stdout
+    local p="$1" d="${2:-}" a
+    if [ -n "$d" ]; then printf '%s [%s]: ' "$p" "$d" >&2; else printf '%s: ' "$p" >&2; fi
+    IFS= read -r a || a=""
+    printf '%s' "${a:-$d}"
+  }
+  slugify() { # 한글은 자동 변환이 불가하므로 ASCII만 남기고, 비면 빈 문자열
+    printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-' | sed 's/^[^a-z]*//' | cut -c1-32
+  }
+
+  SLUG="$NEWTEAM"
+  case "$SLUG" in [a-z]*) ;; *) echo "팀 파일명은 소문자로 시작해야 합니다: $SLUG" >&2; exit 1 ;; esac
+  OUT="$PROMPT_DIR/teams/$SLUG.json"
+  if [ -e "$OUT" ] && [ -z "$FORCE" ]; then
+    echo "이미 있습니다: $OUT  (덮어쓰려면 --force)" >&2; exit 1
+  fi
+
+  echo "새 팀 프리셋 만들기 — $SLUG"
+  echo "(엔터만 치면 대괄호 안 기본값이 들어갑니다)"
+  echo
+  T_NAME=$(ask "팀 이름" "$SLUG 팀")
+  T_DESC=$(ask "이 팀은 무엇을 하는가 (한두 문장)" "")
+  T_CWD=$(ask "기본 작업 디렉토리 (비우면 실행 위치)" "")
+  T_FLOW=$(ask "작업 흐름 (예: 조사 → 설계 → 구현 → 검증)" "")
+  echo
+  echo "역할을 순서대로 입력하세요. **순서 = N명 뽑을 때 우선순위**입니다."
+  echo "빈 이름으로 엔터를 치면 끝납니다."
+  echo
+
+  R_NAMES=(); R_SLUGS=(); R_BRIEFS=()
+  ri=1
+  while :; do
+    rn=$(ask "  역할 $ri 이름 (끝내려면 빈 엔터)" "")
+    [ -n "$rn" ] || break
+    sug=$(slugify "$rn"); [ -n "$sug" ] || sug="role-$ri"
+    rs=$(ask "  └ 영문 슬러그 (herdr agent 이름, [a-z][a-z0-9_-])" "$sug")
+    rs=$(slugify "$rs"); [ -n "$rs" ] || rs="role-$ri"
+    rb=$(ask "  └ 한 줄 책임" "")
+    R_NAMES+=("$rn"); R_SLUGS+=("$rs"); R_BRIEFS+=("$rb")
+    ri=$((ri+1)); echo
+  done
+  [ "${#R_NAMES[@]}" -gt 0 ] || { echo "역할이 하나도 없습니다. 취소합니다." >&2; exit 1; }
+
+  # ── 역할 prompt 채우기 ──
+  echo "역할별 지시문(prompt)을 어떻게 채울까요?"
+  echo "  1) 템플릿만 넣는다 — 나중에 직접 편집"
+  echo "  2) AI가 초안을 쓴다 — 팀 설명과 역할을 보고 작성 (수십 초)"
+  PMODE=$(ask "선택" "$([ -n "$NEWTEAM_AI" ] && echo 2 || echo 1)")
+
+  ROLES_JSON=""
+  if [ "$PMODE" = "2" ]; then
+    echo "AI가 초안을 작성 중입니다..."
+    _rl=""
+    i=0; while [ $i -lt ${#R_NAMES[@]} ]; do
+      _rl="$_rl
+- ${R_NAMES[i]} (슬러그 ${R_SLUGS[i]}): ${R_BRIEFS[i]}"
+      i=$((i+1))
+    done
+    ROLES_JSON=$($PLANNER_CMD --model "$LEAD_MODEL" -p "다음 팀의 각 역할에 대한 시스템 프롬프트를 작성하라.
+
+팀 이름: $T_NAME
+설명: $T_DESC
+흐름: $T_FLOW
+역할:$_rl
+
+각 prompt 작성 요령:
+- 판단 기준을 준다 (언제 되돌리고 언제 통과시키는가)
+- 하지 말 것을 명시한다 (금지가 권장보다 잘 지켜진다)
+- 산출물 위치와 다음 수령자를 적는다
+- '최선을 다해라' 같은 무의미한 말은 넣지 마라
+- 검증 역할이면 '통과시켜라'가 아니라 '틀린 곳을 찾아라'로 쓴다
+- 3~6문장. 한국어.
+
+출력은 JSON 배열 하나만. 설명·코드펜스 금지. 형식:
+[{\"name\":\"역할명\",\"en\":\"슬러그\",\"brief\":\"한줄책임\",\"prompt\":\"지시문\"}]
+역할 순서와 name·en·brief는 위에 준 값을 그대로 쓸 것." 2>/dev/null \
+      | sed -e 's/^```json$//' -e 's/^```$//')
+    if ! printf '%s' "$ROLES_JSON" | jq -e 'type=="array" and length>0' >/dev/null 2>&1; then
+      echo "AI 초안이 올바른 JSON이 아닙니다. 템플릿으로 대체합니다." >&2
+      ROLES_JSON=""
+    fi
+  fi
+
+  if [ -z "$ROLES_JSON" ]; then
+    ROLES_JSON=$(python3 - "$(printf '%s\n' "${R_NAMES[@]}")" "$(printf '%s\n' "${R_SLUGS[@]}")" "$(printf '%s\n' "${R_BRIEFS[@]}")" <<'PY'
+import json,sys
+names=sys.argv[1].split("\n"); slugs=sys.argv[2].split("\n"); briefs=sys.argv[3].split("\n")
+out=[]
+for n,s,b in zip(names,slugs,briefs):
+    if not n: continue
+    out.append({"name":n,"en":s,"brief":b or "(한 줄 책임을 적으세요)",
+      "prompt":f"너는 {n}이다. {b or '(책임을 적으세요)'}\n\n"
+               "[여기에 판단 기준·금지사항·산출물 위치·다음 수령자를 적으세요]\n"
+               "예) 완료 보고 시 다음 수령자를 함께 적는다. 막히면 추측하지 말고 orch에 되묻는다.",
+      "mcp":[],"plugins":[]})
+print(json.dumps(out,ensure_ascii=False))
+PY
+)
+  fi
+
+  mkdir -p "$PROMPT_DIR/teams"
+  python3 - "$OUT" "$T_NAME" "$T_DESC" "$T_CWD" "$T_FLOW" "$ROLES_JSON" <<'PY'
+import json,sys
+out,name,desc,cwd,flow,roles = sys.argv[1:7]
+d={"name":name}
+if cwd: d["cwd"]=cwd
+if desc: d["description"]=desc
+if flow: d["flow"]=flow
+d["guides"]=["handoff.md"]
+d["roles"]=json.loads(roles)
+json.dump(d,open(out,"w"),indent=2,ensure_ascii=False)
+open(out,"a").write("\n")
+PY
+
+  echo
+  if validate_spec "$OUT"; then
+    echo "✅ 만들었습니다: $OUT"
+  else
+    echo "⚠️  위 항목을 채워야 실행됩니다: $OUT" >&2
+  fi
+  echo
+  echo "  확인   orch --show $SLUG"
+  echo "  편집   \${EDITOR:-vi} $OUT"
+  echo "  실행   orch ${#R_NAMES[@]} --team $SLUG"
+  exit 0
+fi
+
+# ── --show: 팀을 띄우기 전에 무엇이 들어 있는지 본다 ──
+if [ -n "$SHOW_TEAM" ]; then
+  f="$PROMPT_DIR/teams/$SHOW_TEAM.json"
+  [ -f "$f" ] || { echo "그런 팀이 없습니다: $SHOW_TEAM  (orch --list-teams)" >&2; exit 1; }
+  jq -e . "$f" >/dev/null 2>&1 || { echo "JSON 문법 오류: $f" >&2; jq . "$f"; exit 1; }
+  jq -r '
+    "\(.name)   [\(.roles|length)개 역할]",
+    (if .cwd then "작업 디렉토리: \(.cwd)" else empty end),
+    (if .description then "\n\(.description)" else empty end),
+    (if .flow then "\n흐름: \(.flow)" else empty end),
+    "\n순서 = N명 뽑을 때 우선순위\n",
+    (.roles | to_entries[] |
+      "\(.key+1|tostring|(" "*(2-length))+.)  \(.value.name)  (\(.value.en // "en없음"))\n     \(.value.brief // "brief없음")" +
+      (if (.value.mcp // []) | length > 0 then "\n     MCP: \((.value.mcp)|join(", "))" else "" end))
+  ' "$f"
+  exit 0
+fi
 
 # ── 에이전트 종류 검증 + 기본 모델 ──
 case "$AGENT_KIND" in

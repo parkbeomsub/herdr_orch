@@ -4,6 +4,7 @@
 [herdr](https://herdr.dev) 위에서 도는 얇은 bash 레이어 — 팀 프리셋, 팬 간 메시징, 워크스페이스 격리.
 
 ```bash
+orch --doctor              # 설치가 제대로 됐는지 한 번에 점검
 orch --show dev            # 어떤 역할이 들어있는지 먼저 본다
 orch 4 --team dev          # 개발팀 4명 (PM·테크리드·디자이너·풀스택)
 orch 4 --agent codex       # Claude Code 대신 Codex로
@@ -82,7 +83,18 @@ orch 4 --team dev --cwd ~/myproject   # 개발팀 4명을 내 프로젝트에서
 
 **`video`는 AI 팀에 맞게 각색했습니다.** 에이전트는 물리 촬영을 못 하므로 '촬영감독'을 '비주얼생성'으로 바꾸고, 실물 촬영팀에 없는 **AI티 검수** 역할을 최종 게이트로 넣었습니다.
 
-직접 만들려면 `config/teams/dev.json`을 복사해 고치세요. 스키마는 [docs/TEAMS.md](docs/TEAMS.md)에 있습니다.
+### 직접 만들기
+
+```bash
+orch --new-team myteam          # 질문에 답하면 JSON이 생성됨
+orch --new-team myteam --ai     # 역할 지시문 초안까지 AI가 작성
+```
+
+`--ai`는 팀 설명과 역할 목록을 보고 각 역할의 시스템 프롬프트를 씁니다. 예를 들어 "침투테스터"에게는 이런 게 나옵니다:
+
+> 너는 정적분석 결과가 **틀린 곳을 찾는다** — 오탐(실제로는 도달 불가능한 경로)과 누락 양쪽을 모두 겨냥해라. 재현 가능한 PoC를 붙이지 못한 항목은 '악용 가능'이라고 쓰지 말고 **미검증으로 되돌린다.** 승인된 스코프 밖 자산은 건드리지 마라.
+
+초안이므로 그대로 쓰지 말고 검토하세요. JSON을 직접 고쳐도 됩니다 — 스키마는 [docs/TEAMS.md](docs/TEAMS.md)에.
 
 ## 위키를 주면 팀을 짜줍니다
 
