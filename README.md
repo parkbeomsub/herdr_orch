@@ -15,7 +15,8 @@ orch --stop                # 이 스페이스의 팀 정리
 
 ![demo](docs/demo.gif)
 
-<sub>위 GIF는 [`docs/demo.tape`](docs/demo.tape)로 렌더링됩니다 — `brew install vhs && vhs docs/demo.tape`</sub>
+<sub>`orch 4 --team dev` 한 줄로 오케스트레이터 + 에이전트 4명이 뜨고, 지시를 받아 일을 시작합니다.<br>
+GIF는 [`docs/demo.tape`](docs/demo.tape)로 렌더링됩니다 — `brew install vhs && vhs docs/demo.tape`</sub>
 
 ---
 
