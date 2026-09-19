@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orch — 에이전트 팀 현황</title>
+<style>
+  :root{
+    --bg:#070a10; --panel:#0e131c; --panel2:#131a26; --line:#1e2836;
+    --fg:#e6edf6; --dim:#7d8fa6; --dimmer:#4a5a6e;
+    --working:#2ee6a8; --blocked:#ffb340; --idle:#4a5a6e; --unknown:#33415a;
+    --accent:#5b9dff;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font-family:"Pretendard","Apple SD Gothic Neo",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    font-variant-numeric:tabular-nums;
+  }
+  code,.mono{font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace}
+  .wrap{max-width:1320px;margin:0 auto;padding:28px 22px 60px}
+
+  /* ── 헤더 ───────────────────────────────── */
+  header{display:flex;align-items:flex-end;gap:18px;flex-wrap:wrap;margin-bottom:22px}
+  .brand{font-size:30px;font-weight:800;letter-spacing:-.5px}
+  .brand span{color:var(--accent)}
+  .sub{color:var(--dim);font-size:13px;padding-bottom:5px}
+  .live{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--dim);font-size:12px}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--working);
+       box-shadow:0 0 0 0 rgba(46,230,168,.6);animation:pulse 2s infinite}
+  @keyframes pulse{70%{box-shadow:0 0 0 7px rgba(46,230,168,0)}100%{box-shadow:0 0 0 0 rgba(46,230,168,0)}}
+
+  /* ── 지표 ───────────────────────────────── */
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:22px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .stat b{display:block;font-size:28px;font-weight:700;line-height:1.15}
+  .stat small{color:var(--dim);font-size:11.5px;letter-spacing:.3px}
+  .stat.on b{color:var(--working)} .stat.bl b{color:var(--blocked)}
+
+  /* ── 카드 공통 ──────────────────────────── */
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-bottom:18px;overflow:hidden}
+  .card > h2{margin:0;padding:15px 18px;font-size:13px;font-weight:600;letter-spacing:.4px;
+             color:var(--dim);border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center}
+  .card > h2 em{font-style:normal;color:var(--dimmer);font-weight:400}
+
+  /* ── 흐름 그래프 ────────────────────────── */
+  #graph{width:100%;height:440px;display:block}
+  .nodeLabel{font-size:12px;font-weight:600;fill:var(--fg)}
+  .nodeSub{font-size:10px;fill:var(--dim)}
+  .legend{display:flex;gap:16px;padding:12px 18px;border-top:1px solid var(--line);
+          color:var(--dim);font-size:11.5px;flex-wrap:wrap}
+  .legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:1px}
+
+  /* ── 에이전트 카드 ──────────────────────── */
+  .agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:11px;padding:16px}
+  .ag{background:var(--panel2);border:1px solid var(--line);border-left-width:3px;border-radius:10px;padding:13px 14px}
+  .ag.working{border-left-color:var(--working)}
+  .ag.blocked{border-left-color:var(--blocked)}
+  .ag.idle,.ag.done{border-left-color:var(--idle)}
+  .ag.unknown{border-left-color:var(--unknown)}
+  .ag .top{display:flex;align-items:center;gap:7px;margin-bottom:7px}
+  .ag .nm{font-weight:700;font-size:14.5px}
+  .ag .st{margin-left:auto;font-size:10.5px;padding:2px 7px;border-radius:20px;
+          background:rgba(255,255,255,.05);color:var(--dim)}
+  .ag.working .st{color:var(--working)} .ag.blocked .st{color:var(--blocked)}
+  .ag .ti{color:var(--dim);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ag .mt{color:var(--dimmer);font-size:10.5px;margin-top:6px}
+  .lead{border-left-color:var(--accent)!important;background:#101a2b}
+  .lead .nm{color:var(--accent)}
+
+  /* ── 타임라인 ───────────────────────────── */
+  .log{max-height:360px;overflow-y:auto;padding:6px 0}
+  .ln{display:grid;grid-template-columns:76px 1fr;gap:12px;padding:8px 18px;border-bottom:1px solid #131b27}
+  .ln:last-child{border-bottom:0}
+  .ln .tm{color:var(--dimmer);font-size:11px;font-family:"SF Mono",ui-monospace,Menlo,monospace;padding-top:2px}
+  .ln .who{font-size:12px;margin-bottom:3px}
+  .ln .who b{color:var(--accent);font-weight:600}
+  .ln .who i{font-style:normal;color:var(--dimmer);margin:0 5px}
+  .ln .bd{color:#b9c7d8;font-size:12.5px;line-height:1.55;
+          display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .teamhead{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;gap:14px;
+            align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--dim)}
+  .teamhead b{color:var(--fg);font-size:15px}
+  .pill{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:2px 8px;font-size:11px}
+  .empty{padding:40px 18px;text-align:center;color:var(--dimmer);font-size:13px}
+  footer{color:var(--dimmer);font-size:11.5px;text-align:center;margin-top:26px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">orch<span>.</span></div>
+    <div class="sub">AI 에이전트 팀 오케스트레이터</div>
+    <div class="live"><span class="dot"></span><span id="gen">—</span></div>
+  </header>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="card">
+    <h2>메시지 흐름 <em id="flowmeta"></em></h2>
+    <svg id="graph"></svg>
+    <div class="legend">
+      <span><i style="background:var(--working)"></i>작업 중</span>
+      <span><i style="background:var(--blocked)"></i>막힘</span>
+      <span><i style="background:var(--idle)"></i>대기</span>
+      <span><i style="background:var(--accent)"></i>오케스트레이터</span>
+      <span style="margin-left:auto">선 굵기 = 주고받은 메시지 수</span>
+    </div>
+  </div>
+
+  <div id="teams"></div>
+
+  <div class="card">
+    <h2>최근 대화 <em id="logmeta"></em></h2>
+    <div class="log" id="log"></div>
+  </div>
+
+  <footer>orch — herdr 위에서 도는 bash 오케스트레이터 · 데이터는 herdr agent list + comms/log.md 에서 직접 읽습니다</footer>
+</div>
+
+<script id="orch-data" type="application/json">
+{
+  "generated": "2026-09-19T14:02:11",
+  "workspace": "w3",
+  "teams": [{
+    "tab": "w3:t2", "tab_label": "orch", "team": "dev",
+    "cwd": "~/projects/checkout-v2", "created": "2026-09-19T11:40:02",
+    "lead_model": "claude-opus-5[1m]", "model": "opus",
+    "orchestrator": {"name":"오케스트레이터","pane":"w3:p2","status":"working","title":"3건 리뷰 대기 · 결제 모듈 배정 중","model":"claude-opus-5[1m]"},
+    "agents": [
+      {"name":"PM","slug":"product-manager","pane":"w3:p3","status":"working","title":"요구사항 정리 — 비회원 결제","model":"opus"},
+      {"name":"테크리드","slug":"tech-lead","pane":"w3:p4","status":"working","title":"PG 연동 인터페이스 설계","model":"opus"},
+      {"name":"디자이너","slug":"product-designer","pane":"w3:p5","status":"idle","title":"결제 플로우 와이어프레임 완료","model":"opus"},
+      {"name":"풀스택","slug":"fullstack-engineer","pane":"w3:p6","status":"working","title":"POST /orders 구현 중","model":"opus"},
+      {"name":"QA","slug":"qa-engineer","pane":"w3:p7","status":"blocked","title":"스테이징 PG 키 없음 — 대기","model":"opus"},
+      {"name":"리서처","slug":"researcher","pane":"w3:p8","status":"working","title":"경쟁사 결제 UX 6곳 비교","model":"opus"},
+      {"name":"보안검토","slug":"security-reviewer","pane":"w3:p9","status":"idle","title":"카드번호 로깅 점검 완료","model":"opus"},
+      {"name":"문서","slug":"tech-writer","pane":"w3:p10","status":"working","title":"API 레퍼런스 초안","model":"opus"}
+    ],
+    "messages": []
+  }],
+  "stats": {"teams":1,"agents":9,"working":6,"idle":2,"blocked":1,"messages":184},
+  "edges": [
+    {"from":"오케스트레이터","to":"테크리드","count":21},
+    {"from":"오케스트레이터","to":"풀스택","count":19},
+    {"from":"오케스트레이터","to":"PM","count":17},
+    {"from":"테크리드","to":"풀스택","count":15},
+    {"from":"오케스트레이터","to":"QA","count":13},
+    {"from":"PM","to":"디자이너","count":12},
+    {"from":"오케스트레이터","to":"리서처","count":11},
+    {"from":"풀스택","to":"QA","count":10},
+    {"from":"오케스트레이터","to":"보안검토","count":9},
+    {"from":"디자이너","to":"풀스택","count":8},
+    {"from":"테크리드","to":"보안검토","count":7},
+    {"from":"오케스트레이터","to":"디자이너","count":7},
+    {"from":"리서처","to":"PM","count":6},
+    {"from":"오케스트레이터","to":"문서","count":6},
+    {"from":"풀스택","to":"문서","count":5},
+    {"from":"QA","to":"테크리드","count":4}
+  ],
+  "recent": [
+    {"ts":"2026-09-19 14:01:58","from":"QA","to":"오케스트레이터","body":"스테이징 PG 테스트 키가 없어서 결제 성공 케이스를 못 돌립니다. 실패 케이스 7건은 통과했습니다. 키 받기 전까지 회귀 스위트만 돌리고 있겠습니다."},
+    {"ts":"2026-09-19 14:01:12","from":"오케스트레이터","to":"풀스택","body":"테크리드가 올린 PaymentGateway 인터페이스 확정됐습니다. charge/refund/verify 세 개만 먼저 구현하고 webhook은 다음 턴으로 미루세요. QA가 막혀 있으니 실패 경로부터 채우는 게 낫습니다."},
+    {"ts":"2026-09-19 14:00:40","from":"테크리드","to":"오케스트레이터","body":"PG 추상화 끝냈습니다. 어댑터를 갈아끼울 수 있게 했고 재시도는 어댑터 밖으로 뺐습니다. 안에 두면 PG마다 재시도 정책이 달라져 테스트가 불가능해집니다."},
+    {"ts":"2026-09-19 13:59:55","from":"보안검토","to":"테크리드","body":"로깅 점검 끝. 카드번호 원문이 남는 곳은 없었지만 에러 핸들러가 요청 본문 전체를 덤프하는 경로가 하나 있었습니다. 마스킹 필터를 그 앞에 넣어야 합니다."},
+    {"ts":"2026-09-19 13:58:30","from":"리서처","to":"PM","body":"경쟁사 6곳 중 5곳이 비회원 결제에서 이메일만 받습니다. 전화번호까지 받는 곳은 한 곳이고 이탈률이 눈에 띄게 높았습니다. 이메일만 받는 쪽을 권합니다."},
+    {"ts":"2026-09-19 13:57:44","from":"PM","to":"디자이너","body":"리서처 결과 반영해서 비회원 결제는 이메일 한 칸으로 줄입시다. 전화번호 필드는 빼주세요."},
+    {"ts":"2026-09-19 13:56:20","from":"오케스트레이터","to":"리서처","body":"경쟁사 비회원 결제에서 어떤 정보를 받는지 조사해주세요. 필드 개수와 이탈률 언급이 있으면 같이요."},
+    {"ts":"2026-09-19 13:55:02","from":"풀스택","to":"오케스트레이터","body":"POST /orders 뼈대 올렸습니다. 멱등키를 헤더로 받게 했습니다 — 결제는 중복 요청이 반드시 들어오고 그때 두 번 긁히면 되돌릴 수가 없습니다."},
+    {"ts":"2026-09-19 13:53:39","from":"오케스트레이터","to":"보안검토","body":"결제 경로에 카드번호가 로그로 새는 곳이 있는지 봐주세요. 에러 핸들러까지 포함해서요."},
+    {"ts":"2026-09-19 13:52:10","from":"디자이너","to":"풀스택","body":"결제 실패 화면 시안 올렸습니다. 실패 사유를 그대로 노출하지 말고 재시도 가능 여부만 구분해주세요. PG 원문 메시지는 사용자가 이해 못 합니다."},
+    {"ts":"2026-09-19 13:50:48","from":"오케스트레이터","to":"PM","body":"비회원 결제 요구사항 한 장으로 정리해주세요. 회원 결제와 다른 지점만요."},
+    {"ts":"2026-09-19 13:49:01","from":"문서","to":"오케스트레이터","body":"API 레퍼런스 초안 잡았습니다. 인터페이스가 아직 움직이고 있어서 엔드포인트 목록만 먼저 고정하고 스키마는 비워뒀습니다."}
+  ]
+}
+</script>
+<script>
+"use strict";
+
+var STATUS_KO = {working:"작업 중", blocked:"막힘", idle:"대기", done:"완료", unknown:"알 수 없음"};
+var STATUS_COLOR = {working:"#2ee6a8", blocked:"#ffb340", idle:"#4a5a6e", done:"#4a5a6e", unknown:"#33415a"};
+
+/**
+ * 에이전트 카드를 어떤 순서로 보여줄지 정한다.
+ *
+ * 오너가 대시보드를 보는 이유는 "지금 누구를 봐야 하나"이다.
+ * 그 답을 정하는 게 이 함수다 — 정답이 하나가 아니다.
+ *
+ * @param {Array<{name:string,status:string,title:string,pane:string}>} agents
+ * @param {Array<{ts:string,from:string,to:string,body:string}>} messages 이 팀의 메시지(시간순)
+ * @returns {Array} 화면에 그릴 순서대로 정렬된 배열
+ *
+ * TODO(오너): 정렬 기준을 정해주세요. 고려할 축:
+ *   - blocked 를 맨 위로? (막힌 사람이 곧 병목)
+ *   - 마지막 메시지가 오래된 순? (조용히 놀고 있는 사람을 찾음)
+ *   - 팀 편성 순서 고정? (위치가 안 바뀌어 눈이 익음 — 지금 동작)
+ * 지금은 편성 순서 그대로 둡니다.
+ */
+function sortAgents(agents, messages) {
+  return agents;
+}
+
+function esc(s){ return String(s == null ? "" : s).replace(/[&<>"]/g, function(c){
+  return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); }
+
+function shortTime(ts){
+  var m = String(ts || "").match(/(\d{2}):(\d{2}):(\d{2})/);
+  return m ? m[1] + ":" + m[2] : String(ts || "").slice(-8);
+}
+
+/* ── 지표 ─────────────────────────────────────────── */
+function renderStats(d){
+  var s = d.stats || {};
+  var items = [
+    ["에이전트", s.agents || 0, ""],
+    ["작업 중", s.working || 0, "on"],
+    ["막힘", s.blocked || 0, s.blocked ? "bl" : ""],
+    ["대기", s.idle || 0, ""],
+    ["주고받은 메시지", s.messages || 0, ""],
+    ["활성 팀", s.teams || 0, ""]
+  ];
+  document.getElementById("stats").innerHTML = items.map(function(it){
+    return '<div class="stat ' + it[2] + '"><b>' + it[1] + '</b><small>' + it[0] + '</small></div>';
+  }).join("");
+  document.getElementById("gen").textContent = (d.generated || "").replace("T", " ") + " · " + (d.workspace || "");
+}
+
+/* ── 흐름 그래프 ──────────────────────────────────────
+   오케스트레이터를 중심에 두고 에이전트를 원둘레에 배치한다.
+   오케스트레이터가 낀 대화는 바큇살, 에이전트끼리는 원을 가로지르는 현으로 그린다.
+   그래야 "한 명이 지휘한다"는 구조가 한눈에 보인다. */
+function renderGraph(d){
+  var svg = document.getElementById("graph");
+  var teams = d.teams || [];
+  if (!teams.length){ svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="#4a5a6e" font-size="13">활성 팀이 없습니다</text>'; return; }
+
+  // 고정 좌표계로 그리고 CSS 가 늘이게 한다.
+  // clientWidth 를 읽으면 레이아웃 전에 불렸을 때 0 이나 좌우 폭이 나와 viewBox 가 틀어진다.
+  var W = 1100, H = 440;
+  var cx = W / 2, cy = H / 2, RX = 372, RY = 150;
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+
+  var lead = teams[0].orchestrator;
+  var agents = [];
+  teams.forEach(function(t){ (t.agents || []).forEach(function(a){ agents.push(a); }); });
+
+  // 로그에만 등장하고 편성엔 없는 이름도 노드로 살린다 — 그래야 그래프가 정직하다
+  var known = {}; agents.forEach(function(a){ known[a.name] = 1; });
+  var leadNames = {}; leadNames[lead.name] = 1;
+  ["오케스트레이션","오케스트레이터","orch"].forEach(function(n){ leadNames[n] = 1; });
+  (d.edges || []).forEach(function(e){
+    [e.from, e.to].forEach(function(n){
+      if (!known[n] && !leadNames[n]){ known[n] = 1; agents.push({name:n, status:"unknown", title:"", pane:""}); }
+    });
+  });
+
+  var pos = {}, N = agents.length || 1;
+  agents.forEach(function(a, i){
+    var ang = (i / N) * Math.PI * 2 - Math.PI / 2;
+    pos[a.name] = {x: cx + Math.cos(ang) * RX, y: cy + Math.sin(ang) * RY, a: a};
+  });
+  // A\u2192B \uc640 B\u2192A \ub294 \uac19\uc740 \uc120\uc774\ub2e4 \u2014 \ubb34\ubc29\ud5a5\uc73c\ub85c \ud569\uce58\uc9c0 \uc54a\uc73c\uba74 \ub450 \uacb9\uc774 \uacf9\uccd0 \uadf8\ub824\uc838 \uad75\uae30\uac00 \uac70\uc9d3\ub9d0\uc744 \ud55c\ub2e4
+  var merged = {};
+  (d.edges || []).forEach(function(e){
+    var k = [e.from, e.to].sort().join("\u0000");
+    if (!merged[k]) merged[k] = {from: e.from, to: e.to, count: 0};
+    merged[k].count += e.count;
+  });
+  var edges = Object.keys(merged).map(function(k){ return merged[k]; }).sort(function(a, b){ return b.count - a.count; });
+  var maxCount = Math.max.apply(null, edges.map(function(e){ return e.count; }).concat([1]));
+
+  var parts = [];
+  parts.push('<defs><filter id="glow"><feGaussianBlur stdDeviation="3.2" result="b"/>' +
+             '<feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>');
+
+  // 간선
+  edges.forEach(function(e, i){
+    var isLead = leadNames[e.from] || leadNames[e.to];
+    var p1 = leadNames[e.from] ? {x:cx, y:cy} : (pos[e.from] || null);
+    var p2 = leadNames[e.to]   ? {x:cx, y:cy} : (pos[e.to]   || null);
+    if (!p1 || !p2) return;
+    var w = 0.7 + (e.count / maxCount) * 4.3;
+    var col = isLead ? "#5b9dff" : "#2ee6a8";
+    var mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+    // 에이전트끼리는 중심을 피해 바깥으로 휘게 한다
+    if (!isLead){ mx += (mx - cx) * 0.18; my += (my - cy) * 0.30; }
+    var dPath = "M" + p1.x.toFixed(1) + "," + p1.y.toFixed(1) +
+                " Q" + mx.toFixed(1) + "," + my.toFixed(1) +
+                " " + p2.x.toFixed(1) + "," + p2.y.toFixed(1);
+    parts.push('<path d="' + dPath + '" fill="none" stroke="' + col + '" stroke-width="' + w.toFixed(2) +
+               '" stroke-opacity="' + (0.16 + (e.count / maxCount) * 0.4).toFixed(2) + '" stroke-linecap="round"/>');
+    // 메시지가 흐르는 느낌 — 상위 간선에만
+    if (i < 12){
+      parts.push('<circle r="2.6" fill="' + col + '" opacity="0.9">' +
+                 '<animateMotion dur="' + (2.4 + (i % 5) * 0.45).toFixed(2) + 's" repeatCount="indefinite" path="' + dPath + '"/></circle>');
+    }
+  });
+
+  // 에이전트 노드
+  agents.forEach(function(a){
+    var p = pos[a.name]; if (!p) return;
+    var col = STATUS_COLOR[a.status] || STATUS_COLOR.unknown;
+    parts.push('<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="20" fill="#0e131c" stroke="' + col + '" stroke-width="2"' +
+               (a.status === "working" ? ' filter="url(#glow)"' : '') + '/>');
+    if (a.status === "working"){
+      parts.push('<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="20" fill="none" stroke="' + col + '" stroke-width="1.5" opacity="0.5">' +
+                 '<animate attributeName="r" values="20;31;20" dur="2.4s" repeatCount="indefinite"/>' +
+                 '<animate attributeName="opacity" values="0.5;0;0.5" dur="2.4s" repeatCount="indefinite"/></circle>');
+    }
+    // 이름이 항상 위, 상태가 그 아래. 원 반지름이 20 이므로 최소 10px 띄운다.
+    var below = p.y > cy;
+    var yName = p.y + (below ? 42 : -46), ySub = p.y + (below ? 56 : -32);
+    parts.push('<text class="nodeLabel" x="' + p.x.toFixed(1) + '" y="' + yName.toFixed(1) +
+               '" text-anchor="middle">' + esc(a.name) + '</text>');
+    parts.push('<text class="nodeSub" x="' + p.x.toFixed(1) + '" y="' + ySub.toFixed(1) +
+               '" text-anchor="middle">' + esc(STATUS_KO[a.status] || a.status) + '</text>');
+  });
+
+  // 중심 오케스트레이터
+  var lcol = STATUS_COLOR[lead.status] || "#5b9dff";
+  parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="40" fill="#101a2b" stroke="#5b9dff" stroke-width="2.5" filter="url(#glow)"/>');
+  parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="40" fill="none" stroke="' + lcol + '" stroke-width="1.5" opacity="0.45">' +
+             '<animate attributeName="r" values="40;58;40" dur="3.2s" repeatCount="indefinite"/>' +
+             '<animate attributeName="opacity" values="0.45;0;0.45" dur="3.2s" repeatCount="indefinite"/></circle>');
+  parts.push('<text x="' + cx + '" y="' + (cy - 3) + '" text-anchor="middle" font-size="19">👑</text>');
+  parts.push('<text class="nodeLabel" x="' + cx + '" y="' + (cy + 16) + '" text-anchor="middle" fill="#5b9dff" font-size="11">오케스트레이터</text>');
+
+  svg.innerHTML = parts.join("");
+  document.getElementById("flowmeta").textContent =
+    "노드 " + (agents.length + 1) + "개 · 간선 " + edges.length + "개";
+}
+
+/* ── 팀 + 에이전트 카드 ───────────────────────────── */
+function renderTeams(d){
+  var host = document.getElementById("teams");
+  var teams = d.teams || [];
+  if (!teams.length){ host.innerHTML = '<div class="card"><div class="empty">활성 팀이 없습니다 — <code>orch 4 --team dev</code> 로 띄워보세요</div></div>'; return; }
+
+  host.innerHTML = teams.map(function(t){
+    var all = [t.orchestrator].concat(sortAgents(t.agents || [], t.messages || []));
+    var cards = all.map(function(a, i){
+      return '<div class="ag ' + esc(a.status) + (i === 0 ? ' lead' : '') + '">' +
+        '<div class="top"><span class="nm">' + esc(a.name) + '</span>' +
+        '<span class="st">' + esc(STATUS_KO[a.status] || a.status) + '</span></div>' +
+        '<div class="ti">' + esc(a.title || "—") + '</div>' +
+        '<div class="mt mono">' + esc(a.pane || "—") + (a.model ? " · " + esc(a.model) : "") + '</div>' +
+      '</div>';
+    }).join("");
+    return '<div class="card">' +
+      '<div class="teamhead"><b>' + esc(t.team) + '</b>' +
+      '<span class="pill mono">' + esc(t.cwd || "—") + '</span>' +
+      '<span class="pill">탭 ' + esc(t.tab_label) + '</span>' +
+      '<span style="margin-left:auto">생성 ' + esc((t.created || "").replace("T", " ")) + '</span></div>' +
+      '<div class="agents">' + cards + '</div></div>';
+  }).join("");
+}
+
+/* ── 타임라인 ─────────────────────────────────────── */
+function renderLog(d){
+  var rows = d.recent || [];
+  var host = document.getElementById("log");
+  if (!rows.length){ host.innerHTML = '<div class="empty">아직 오간 메시지가 없습니다</div>'; return; }
+  host.innerHTML = rows.map(function(m){
+    return '<div class="ln"><div class="tm">' + esc(shortTime(m.ts)) + '</div><div>' +
+      '<div class="who"><b>' + esc(m.from) + '</b><i>→</i><b>' + esc(m.to) + '</b></div>' +
+      '<div class="bd">' + esc(m.body) + '</div></div></div>';
+  }).join("");
+  document.getElementById("logmeta").textContent = rows.length + "건";
+}
+
+function draw(d){ renderStats(d); renderGraph(d); renderTeams(d); renderLog(d); }
+
+/* 인라인 데이터로 먼저 그린다 (파일을 그냥 열어도 동작).
+   --serve 로 띄운 경우엔 data.json 을 2초마다 받아 갱신한다. */
+var DATA = {};
+try { DATA = JSON.parse(document.getElementById("orch-data").textContent); } catch (e) { DATA = {}; }
+draw(DATA);
+
+function poll(){
+  fetch("data.json?t=" + Date.now(), {cache:"no-store"})
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(j){ if (j) { DATA = j; draw(j); } })
+    .catch(function(){ /* 파일로 직접 연 경우 — 인라인 데이터로 충분하다 */ });
+}
+if (location.protocol.indexOf("http") === 0){ poll(); setInterval(poll, 2000); }
+window.addEventListener("resize", function(){ renderGraph(DATA); });
+</script>
+</body>
+</html>

@@ -42,13 +42,13 @@ BIN="$(pick_bindir)"
 
 # ── 제거 ─────────────────────────────────────────────
 if [ -n "$UNINSTALL" ]; then
-  for f in orch orch-msg orch-snapshot; do
+  for f in orch orch-msg orch-snapshot orch-dash; do
     [ -e "$BIN/$f" ] && { rm -f "$BIN/$f"; say "지움: $BIN/$f"; }
   done
   for f in orchestrator.md agent.md planner.md admin.md snapshot.py; do
     [ -e "$CFG/$f" ] && { rm -f "$CFG/$f"; say "지움: $CFG/$f"; }
   done
-  for d in teams guides lib; do
+  for d in teams guides lib dash; do
     if [ -d "$SRC/config/$d" ]; then
       for f in "$SRC/config/$d"/*; do
         [ -e "$CFG/$d/$(basename "$f")" ] && rm -f "$CFG/$d/$(basename "$f")"
@@ -80,7 +80,7 @@ BV="${BASH_VERSINFO[0]:-0}"
 [ "$BV" -ge 3 ] || die "bash 3.2 이상이 필요합니다 (현재 $BASH_VERSION)"
 
 # ── 설치 ─────────────────────────────────────────────
-mkdir -p "$BIN" "$CFG/teams" "$CFG/guides"
+mkdir -p "$BIN" "$CFG/teams" "$CFG/guides" "$CFG/dash"
 
 copy() { # <src> <dst>
   local s="$1" d="$2"
@@ -95,7 +95,7 @@ copy() { # <src> <dst>
 
 say ""
 say "실행파일 → $BIN"
-for f in orch orch-msg orch-snapshot; do
+for f in orch orch-msg orch-snapshot orch-dash; do
   copy "$SRC/bin/$f" "$BIN/$f"
   chmod +x "$BIN/$f"
   say "  ✅ $f"
@@ -106,7 +106,7 @@ say "설정 → $CFG"
 for f in orchestrator.md agent.md planner.md admin.md snapshot.py; do
   [ -f "$SRC/config/$f" ] && { copy "$SRC/config/$f" "$CFG/$f"; say "  ✅ $f"; }
 done
-for d in teams guides lib; do
+for d in teams guides lib dash; do
   for f in "$SRC/config/$d"/*; do
     [ -f "$f" ] || continue
     copy "$f" "$CFG/$d/$(basename "$f")"
@@ -157,7 +157,7 @@ allow = [
   "Bash(herdr pane send-text:*)", "Bash(herdr pane send-keys:*)",
   "Bash(herdr tab list:*)", "Bash(herdr tab create:*)", "Bash(herdr tab rename:*)",
   "Bash(herdr workspace list)", "Bash(herdr wait:*)", "Bash(herdr notification show:*)",
-  "Bash(orch-msg:*)", "Bash(orch --status:*)", "Bash(orch --list-teams)",
+  "Bash(orch-msg:*)", "Bash(orch --status:*)", "Bash(orch --list-teams)", "Bash(orch --dashboard:*)",
 ]
 cur = d.setdefault("permissions", {}).setdefault("allow", [])
 added = [a for a in allow if a not in cur]

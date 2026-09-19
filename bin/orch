@@ -195,6 +195,14 @@ if [ "${1:-}" = "skill" ]; then
   esac
 fi
 
+# ── --dashboard: 현황을 HTML 로 ──
+# 인자 파싱보다 먼저 걸러낸다 — orch-dash 가 자기 옵션을 직접 해석하게 둔다.
+if [ "${1:-}" = "--dashboard" ]; then
+  shift
+  command -v orch-dash >/dev/null 2>&1 || { echo "orch-dash 를 찾을 수 없습니다. install.sh 를 다시 돌려주세요." >&2; exit 1; }
+  exec orch-dash "$@"
+fi
+
 # ── 인자 없이 실행하면 대화형으로 묻는다 ──
 # 플래그를 하나라도 주면 예전처럼 즉시 실행한다 — 기존 스크립트가 깨지지 않는다.
 # tty 가 없으면(파이프·자동화) 마법사를 띄우지 않는다.

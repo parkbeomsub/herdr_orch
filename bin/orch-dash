@@ -1,0 +1,197 @@
+#!/bin/bash
+# orch-dash — orch 팀 상태를 HTML 대시보드로 보여준다
+#
+# 사용법:
+#   orch-dash                      한 번 생성하고 경로 출력
+#   orch-dash --serve [--port N]   생성 루프 + 로컬 HTTP 서버 (기본 7777)
+#   orch-dash --open               생성 후 브라우저로 열기
+#   orch-dash --json               데이터만 stdout 으로 (디버깅용)
+#   orch-dash --demo               샘플 데이터로 자기완결 HTML (배포/공유용)
+#
+# 옵션:
+#   --workspace <id>   대상 워크스페이스 (기본: 포커스된 곳)
+#   --out <dir>        출력 디렉토리 (기본: ~/.config/herdr/orch/dash)
+#
+# 데이터 출처 세 가지:
+#   1. state/<ws>.json      팀 편성 — 누가 어느 팬에 있는지
+#   2. herdr agent list     실시간 상태 — idle/working/blocked/done
+#   3. <cwd>/comms/log.md   메시지 기록 — 흐름 그래프의 원본
+
+set -euo pipefail
+# stdout 이 닫혀도(| head 등) 중간에 죽지 않는다 — 반쯤 쓰다 만 HTML 을 남기면 안 된다
+trap '' PIPE
+
+SELF_DIR=$(cd "$(dirname "$0")" && pwd -P)
+CONF_DIR="${ORCH_CONF_DIR:-$HOME/.config/herdr/orch}"
+# 저장소에서 바로 실행하는 경우(설치 전) config/ 를 본다
+[ -d "$CONF_DIR/lib" ] || CONF_DIR="$SELF_DIR/../config"
+
+die() { echo "orch-dash: $*" >&2; exit 1; }
+
+command -v jq >/dev/null 2>&1 || die "jq가 필요합니다"
+
+# shellcheck source=/dev/null
+. "$CONF_DIR/lib/state.sh"
+# shellcheck source=/dev/null
+. "$CONF_DIR/lib/dash.sh"
+
+MODE="once"; PORT=7777; WS=""; OUT=""; OPEN=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --serve)     MODE="serve"; shift ;;
+    --json)      MODE="json"; shift ;;
+    --demo)      MODE="demo"; shift ;;
+    --open)      OPEN=1; shift ;;
+    --port)      PORT="${2:?--port 값이 필요합니다}"; shift 2 ;;
+    --workspace) WS="${2:?--workspace 값이 필요합니다}"; shift 2 ;;
+    --out)       OUT="${2:?--out 값이 필요합니다}"; shift 2 ;;
+    -h|--help)   sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)           die "알 수 없는 옵션: $1" ;;
+  esac
+done
+
+OUT="${OUT:-$CONF_DIR/dash}"
+TEMPLATE="$CONF_DIR/dash/template.html"
+[ -f "$TEMPLATE" ] || die "템플릿을 찾을 수 없습니다: $TEMPLATE"
+
+# ── 워크스페이스 결정 ────────────────────────────────
+current_ws() {
+  herdr workspace list 2>/dev/null \
+    | jq -r '.result.workspaces[]? | select(.focused == true) | .workspace_id' | head -1
+}
+
+# ── 데이터 수집 ──────────────────────────────────────
+collect() {
+  local ws="$1"
+  local state agents log_json teams_json
+
+  state=$(state_load "$CONF_DIR/state/$ws.json")
+  agents=$(herdr agent list 2>/dev/null | jq -c --arg ws "$ws" \
+    '[.result.agents[]? | select(.workspace_id == $ws)]' 2>/dev/null || printf '[]')
+
+  # 팀별로 팬 상태를 붙이고, 팀의 cwd 에서 메시지 로그를 읽는다
+  teams_json=$(printf '%s' "$state" | jq -c '[(.teams // [])[]]')
+
+  local out_teams="[]" i=0 n
+  n=$(printf '%s' "$teams_json" | jq 'length')
+  while [ "$i" -lt "$n" ]; do
+    local t cwd lg one
+    t=$(printf '%s' "$teams_json" | jq -c ".[$i]")
+    cwd=$(printf '%s' "$t" | jq -r '.cwd // ""')
+    lg="[]"
+    if [ -n "$cwd" ] && [ -f "$cwd/comms/log.md" ]; then
+      lg=$(dash_parse_log "$cwd/comms/log.md" 200)
+    fi
+    one=$(printf '%s' "$t" | jq -c \
+      --argjson agents "$agents" \
+      --argjson log "$lg" '
+      . as $t
+      | ($agents | map({key: .pane_id, value: .}) | from_entries) as $byPane
+      | {
+          tab: (.tab // ""), tab_label: (.tab_label // "orch"),
+          team: (if (.team // "") == "" then "커스텀" else .team end),
+          cwd: (.cwd // ""), created: (.created // ""),
+          lead_model: (.lead_model // ""), model: (.model // ""),
+          orchestrator: {
+            name: "오케스트레이터", pane: (.orch_pane // ""),
+            status: ($byPane[(.orch_pane // "")].agent_status // "unknown"),
+            title:  ($byPane[(.orch_pane // "")].terminal_title_stripped // ""),
+            model: (.lead_model // "")
+          },
+          agents: [ (.roles // [])[] | {
+            name: (.name // "-"), slug: (.slug // ""), pane: (.pane // ""),
+            status: ($byPane[(.pane // "")].agent_status // "unknown"),
+            title:  ($byPane[(.pane // "")].terminal_title_stripped // ""),
+            model: $t.model
+          } ],
+          messages: $log
+        }')
+    out_teams=$(printf '%s' "$out_teams" | jq -c --argjson o "$one" '. + [$o]')
+    i=$((i + 1))
+  done
+
+  printf '%s' "$out_teams" | jq -c --arg ws "$ws" --arg now "$(date '+%Y-%m-%dT%H:%M:%S')" '
+    . as $teams
+    | ([$teams[].agents[], $teams[].orchestrator]) as $all
+    | ([$teams[].messages[]] | sort_by(.ts)) as $msgs
+    | {
+        generated: $now,
+        workspace: $ws,
+        teams: $teams,
+        stats: {
+          teams:    ($teams | length),
+          agents:   ($all | length),
+          working:  ($all | map(select(.status == "working")) | length),
+          idle:     ($all | map(select(.status == "idle" or .status == "done")) | length),
+          blocked:  ($all | map(select(.status == "blocked")) | length),
+          messages: ($msgs | length)
+        },
+        edges: ($msgs | map({pair: ([.from, .to] | sort), from: .from, to: .to})
+                | group_by(.pair)
+                | map({from: .[0].from, to: .[0].to, count: length})
+                | sort_by(-.count)),
+        recent: ($msgs | reverse | .[0:40])
+      }'
+}
+
+# ── 렌더링 ───────────────────────────────────────────
+render() { # <data_json> <dest_html>
+  mkdir -p "$(dirname "$2")"
+  # 템플릿의 __ORCH_DATA__ 자리에 JSON 을 끼워 넣는다.
+  # sed 는 본문에 / 나 & 가 들어가면 깨지므로 awk 로 한 줄만 치환한다.
+  awk -v datafile="$1" '
+    /__ORCH_DATA__/ {
+      while ((getline line < datafile) > 0) print line
+      next
+    }
+    { print }
+  ' "$2.tpl" > "$2.tmp" && mv "$2.tmp" "$2"
+}
+
+generate() { # <ws> <outdir>
+  local ws="$1" dir="$2"
+  mkdir -p "$dir"
+  collect "$ws" > "$dir/data.json"
+  cp "$TEMPLATE" "$dir/index.html.tpl"
+  render "$dir/data.json" "$dir/index.html"
+  rm -f "$dir/index.html.tpl"
+}
+
+case "$MODE" in
+  json)
+    WS="${WS:-$(current_ws)}"
+    [ -n "$WS" ] || die "워크스페이스를 찾을 수 없습니다. --workspace 로 지정하세요."
+    collect "$WS" | jq .
+    ;;
+
+  demo)
+    mkdir -p "$OUT"
+    [ -f "$CONF_DIR/dash/demo-data.json" ] || die "demo-data.json 이 없습니다"
+    cp "$TEMPLATE" "$OUT/index.html.tpl"
+    render "$CONF_DIR/dash/demo-data.json" "$OUT/index.html"
+    rm -f "$OUT/index.html.tpl"
+    echo "데모 대시보드: $OUT/index.html"
+    ;;
+
+  once)
+    WS="${WS:-$(current_ws)}"
+    [ -n "$WS" ] || die "워크스페이스를 찾을 수 없습니다. --workspace 로 지정하세요."
+    generate "$WS" "$OUT"
+    echo "대시보드: $OUT/index.html  (워크스페이스 $WS)"
+    if [ -n "$OPEN" ]; then open "$OUT/index.html" 2>/dev/null || true; fi
+    ;;
+
+  serve)
+    WS="${WS:-$(current_ws)}"
+    [ -n "$WS" ] || die "워크스페이스를 찾을 수 없습니다. --workspace 로 지정하세요."
+    generate "$WS" "$OUT"
+    echo "http://localhost:$PORT  (워크스페이스 $WS, ctrl+c 로 종료)"
+    if [ -n "$OPEN" ]; then (sleep 1; open "http://localhost:$PORT" 2>/dev/null || true) & fi
+    # 백그라운드에서 2초마다 data.json 만 갱신 — HTML 은 그대로 두고 fetch 로 받아간다
+    ( while :; do sleep 2; collect "$WS" > "$OUT/data.json.tmp" 2>/dev/null \
+        && mv "$OUT/data.json.tmp" "$OUT/data.json"; done ) &
+    REFRESHER=$!
+    trap 'kill $REFRESHER 2>/dev/null || true' EXIT INT TERM
+    ( cd "$OUT" && python3 -m http.server "$PORT" >/dev/null 2>&1 )
+    ;;
+esac

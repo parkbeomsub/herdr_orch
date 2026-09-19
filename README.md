@@ -9,6 +9,7 @@ orch --show dev            # 어떤 역할이 들어있는지 먼저 본다
 orch 4 --team dev          # 개발팀 4명 (PM·테크리드·디자이너·풀스택)
 orch 4 --agent codex       # Claude Code 대신 Codex로
 orch --status              # 누가 일하고 누가 막혔는지
+orch --dashboard --serve   # 같은 걸 브라우저로, 실시간
 orch --reharness           # 규칙을 바꿨다 → 대화는 유지한 채 하네스만 재구축
 orch --stop                # 이 스페이스의 팀 정리
 ```
@@ -288,6 +289,34 @@ orch --self
 
 `setting` 워크스페이스에 orch 명령어 자체를 고도화·관리하는 세션을 하나 띄웁니다.
 작업 디렉토리는 설정 디렉토리이고, 이미 떠 있으면 새로 만들지 않고 그 팬으로 이동합니다.
+
+## 현황을 화면으로 — `orch --dashboard`
+
+팬을 하나씩 열어보지 않고도 팀 전체가 지금 무엇을 하는지 한 장으로 본다.
+
+```bash
+orch --dashboard              # HTML 한 번 생성
+orch --dashboard --serve      # http://localhost:7777 에 띄우고 2초마다 갱신
+orch --dashboard --open       # 생성 후 브라우저로 열기
+orch --dashboard --json       # 데이터만 (스크립트용)
+```
+
+보여주는 것:
+
+| | |
+|---|---|
+| **메시지 흐름 그래프** | 오케스트레이터를 중심에 둔 방사형 — 선 굵기가 주고받은 메시지 수 |
+| **에이전트 카드** | 역할별 상태(작업 중/대기/막힘)와 현재 작업 |
+| **타임라인** | `comms/log.md` 의 최근 대화 |
+
+데이터는 세 곳에서 직접 읽는다 — 별도 에이전트나 수집 데몬이 없다.
+
+1. `state/<ws>.json` — 팀 편성
+2. `herdr agent list` — 실시간 상태
+3. `<cwd>/comms/log.md` — 메시지 기록
+
+생성된 HTML 은 외부 CDN 을 안 쓰는 단일 파일이라 그대로 공유해도 된다.
+`orch --dashboard --demo` 는 샘플 데이터로 같은 화면을 만든다 — 팀이 안 떠 있어도 보인다.
 
 ## 세션 백업과 복구
 
