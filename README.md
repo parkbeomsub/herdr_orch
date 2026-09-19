@@ -315,6 +315,8 @@ orch --dashboard --json       # 데이터만 (스크립트용)
 2. `herdr agent list` — 실시간 상태
 3. `<cwd>/comms/log.md` — 메시지 기록
 
+**라이브 데모 → https://parkbeomsub.github.io/herdr_orch/dashboard/**
+
 생성된 HTML 은 외부 CDN 을 안 쓰는 단일 파일이라 그대로 공유해도 된다.
 `orch --dashboard --demo` 는 샘플 데이터로 같은 화면을 만든다 — 팀이 안 떠 있어도 보인다.
 
