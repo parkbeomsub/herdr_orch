@@ -62,6 +62,7 @@ OS별 상세는 [INSTALL.md](INSTALL.md)를 보세요.
 
 ```bash
 herdr                                 # herdr 실행 (팬 안에서 아래를 친다)
+orch                                  # 인자 없이 치면 용도·위키·모델을 물어봐준다
 orch --list-teams                     # 어떤 팀이 있나
 orch 4 --team dev --cwd ~/myproject   # 개발팀 4명을 내 프로젝트에서
 ```
@@ -82,6 +83,9 @@ orch 4 --team dev --cwd ~/myproject   # 개발팀 4명을 내 프로젝트에서
 | `content` | 단일 에디터 승인 + 병렬 트랙 | 매니저 · 라이터 · SEO · 디자이너 |
 | `video` | 프리/프로덕션/포스트 3단계 | 프로듀서 · 작가 · 감독 · 비주얼생성 |
 | `growth` | Sean Ellis / Reforge 주간 실험 | 리드 · 분석가 · 엔지니어 · 마케터 |
+| `analysis` | 분석 스쿼드 | 분석리드 · 데이터엔지니어 · 분석가 · 검증 |
+| `planning` | Discovery Squad / 듀얼 트랙 | 기획리드 · 리서치 · 명세 · 비판 |
+| `qa` | Quality Engineering / Shift-Left | QA리드 · 테스트설계 · 자동화 · 탐색 |
 
 **`video`는 AI 팀에 맞게 각색했습니다.** 에이전트는 물리 촬영을 못 하므로 '촬영감독'을 '비주얼생성'으로 바꾸고, 실물 촬영팀에 없는 **AI티 검수** 역할을 최종 게이트로 넣었습니다.
 
@@ -227,6 +231,76 @@ orch --reharness             # 각 팬을 --resume 으로 재기동
 ```
 
 프로젝트의 `CLAUDE.md`와 최근 산출물 목록을 다시 읽어 시스템 프롬프트를 갱신하고, **대화 맥락은 `--resume`으로 유지**합니다. 팀 프리셋에 없는 역할(운영 중 추가된 것)도 공통 규칙을 받습니다.
+
+## 한 워크스페이스에 팀 여럿
+
+기획팀을 돌리다 개발팀이 필요해지면 새 탭에 띄우면 됩니다. 각 팀은 자체 오케스트레이터를 갖습니다.
+
+```bash
+orch 4 --add-team 개발              # 새 탭 'orch-dev' 에 개발팀
+orch 4 --add-team qa --name 검증    # 탭 이름을 직접
+```
+
+한 오케가 20명을 넘게 관리하면 맥락이 터집니다. 팀마다 오케를 두고,
+팀 간에는 **오케↔오케**로만 연락하게 했습니다. 남의 팀 에이전트에 직접 쓰면
+그 팀 오케가 상황을 모르게 됩니다.
+
+정리할 때는 대상을 지정합니다.
+
+```bash
+orch --stop                       # 포커스된 탭의 팀만
+orch --stop --tab orch-qa         # 그 팀만
+orch --stop --all-teams           # 전부
+```
+
+## 운영 중 에이전트 업그레이드
+
+에이전트가 능력이 모자라 막혔을 때, 오케스트레이터가 스킬을 찾아 넣어줍니다.
+
+```bash
+orch skill find pdf                             # 후보 검색
+orch skill add vercel-labs/skills --role 연구원  # 설치 + 그 역할만 재기동
+orch skill list                                 # 설치된 목록
+```
+
+- 설치는 팀 작업 디렉토리의 `.claude/skills/` 로 **격리**됩니다. 전역을 오염시키지 않습니다
+- `--role` 을 주면 그 팬만 `--resume` 으로 재기동하므로 **대화 맥락이 유지**됩니다
+- 설치한 스킬은 팀 프리셋의 `skills` 배열에 기록돼, 다음에 같은 팀을 띄우면 자동으로 깔립니다
+
+[vercel-labs/skills](https://github.com/vercel-labs/skills) 의 `npx skills` 를 씁니다.
+없으면 `orch --doctor` 가 알려줍니다.
+
+## 특정 역할만 다시 세우기
+
+```bash
+orch --reharness --only 연구원        # 한 역할만
+orch --reharness --only 연구원,구현    # 여러 역할
+orch --reharness --tab orch-qa        # 다른 탭의 팀을 대상으로
+```
+
+역할 이름은 한글 이름과 영문 슬러그 둘 다 받습니다.
+
+## orch 자체를 관리하는 세션
+
+```bash
+orch --self
+```
+
+`setting` 워크스페이스에 orch 명령어 자체를 고도화·관리하는 세션을 하나 띄웁니다.
+작업 디렉토리는 설정 디렉토리이고, 이미 떠 있으면 새로 만들지 않고 그 팬으로 이동합니다.
+
+## 세션 백업과 복구
+
+재부팅 대비로 레이아웃과 claude 세션 ID 를 스냅샷해 둡니다.
+
+```bash
+orch-snapshot              # 스냅샷 (재부팅 전)
+orch-snapshot --shutdown   # 스냅샷 + herdr 정상 종료
+orch-snapshot --verify     # 재부팅 후 복원 결과 대조
+```
+
+herdr 자체도 `resume_agents_on_restore` 로 복원을 시도하지만, 달라진 경우를 위해
+역할↔세션ID 표와 `claude --resume` 명령을 대장으로 남깁니다.
 
 ## 안 하는 것
 

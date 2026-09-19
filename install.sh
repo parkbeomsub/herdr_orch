@@ -42,13 +42,13 @@ BIN="$(pick_bindir)"
 
 # ── 제거 ─────────────────────────────────────────────
 if [ -n "$UNINSTALL" ]; then
-  for f in orch orch-msg; do
+  for f in orch orch-msg orch-snapshot; do
     [ -e "$BIN/$f" ] && { rm -f "$BIN/$f"; say "지움: $BIN/$f"; }
   done
-  for f in orchestrator.md agent.md planner.md; do
+  for f in orchestrator.md agent.md planner.md admin.md snapshot.py; do
     [ -e "$CFG/$f" ] && { rm -f "$CFG/$f"; say "지움: $CFG/$f"; }
   done
-  for d in teams guides; do
+  for d in teams guides lib; do
     if [ -d "$SRC/config/$d" ]; then
       for f in "$SRC/config/$d"/*; do
         [ -e "$CFG/$d/$(basename "$f")" ] && rm -f "$CFG/$d/$(basename "$f")"
@@ -95,7 +95,7 @@ copy() { # <src> <dst>
 
 say ""
 say "실행파일 → $BIN"
-for f in orch orch-msg; do
+for f in orch orch-msg orch-snapshot; do
   copy "$SRC/bin/$f" "$BIN/$f"
   chmod +x "$BIN/$f"
   say "  ✅ $f"
@@ -103,10 +103,10 @@ done
 
 say ""
 say "설정 → $CFG"
-for f in orchestrator.md agent.md planner.md; do
+for f in orchestrator.md agent.md planner.md admin.md snapshot.py; do
   [ -f "$SRC/config/$f" ] && { copy "$SRC/config/$f" "$CFG/$f"; say "  ✅ $f"; }
 done
-for d in teams guides; do
+for d in teams guides lib; do
   for f in "$SRC/config/$d"/*; do
     [ -f "$f" ] || continue
     copy "$f" "$CFG/$d/$(basename "$f")"

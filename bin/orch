@@ -28,6 +28,17 @@
 #   orch [N] --model NAME       에이전트 모델 (기본 opus = Opus 5)
 #   orch [N] --orch-model NAME  오케스트레이터 모델 (기본 claude-opus-5[1m])
 #
+# 새 기능:
+#   orch                     인자 없이 실행하면 용도·위키·모델을 대화형으로 물어본다
+#   orch --self              orch 명령어 자체를 고도화·관리하는 세션 (setting 스페이스)
+#   orch skill find <키워드>  에이전트에 넣을 스킬을 찾는다
+#   orch skill add <repo> --role <역할>   설치하고 그 역할만 재기동 (맥락 유지)
+#   orch skill list          설치된 스킬 목록
+#   orch --add-team <용도>   같은 워크스페이스 새 탭에 독립 팀을 하나 더
+#   orch --tab <라벨>        대상 팀을 탭으로 지정 (--stop / --reharness)
+#   orch --all-teams         워크스페이스의 모든 팀을 대상으로
+#   orch --reharness --only <역할>  특정 역할만 재구축
+#
 # 예:
 #   orch 4 --roles 리서치,구현,테스트,리뷰
 #
@@ -53,8 +64,14 @@
 #   ORCH_MODEL       에이전트 모델 (기본 opus)
 #   ORCH_LEAD_MODEL  오케스트레이터 모델 (기본 claude-opus-5[1m])
 set -euo pipefail
+# 출력이 끊겨도(예: orch --stop | head) 중간에 죽지 않는다.
+# 죽으면 팬은 닫혔는데 state 에는 남는 불일치가 생긴다.
+trap '' PIPE
 
 PROMPT_DIR="$HOME/.config/herdr/orch"
+
+# lib 로드 — state 처리는 여기서만 한다
+. "$PROMPT_DIR/lib/state.sh"
 CLAUDE_CMD="${ORCH_CLAUDE_CMD:-claude}"
 PLANNER_CMD="${ORCH_PLANNER_CMD:-$CLAUDE_CMD}"   # 위키 분석용 (헤드리스). 테스트 시 분리 지정 가능
 MODEL="${ORCH_MODEL:-opus}"
@@ -78,6 +95,13 @@ REHARNESS=""
 DRYRUN=""
 SHOW_TEAM=""
 STOP=""
+WANT_TAB=""
+ALL_TEAMS=""
+ADD_TEAM=""
+TAB_NAME=""
+TAB_LABEL="orch"
+SELF=""
+ONLY_ROLES=()
 FORCE=""
 DOCTOR=""
 NEWTEAM=""
@@ -86,6 +110,104 @@ NEWTEAM_AI=""
 # 수동 운영 중인 다른 워크스페이스는 영향받지 않는다. --no-teams로 끌 수 있다.
 TEAMS_ENV="CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
 ROLES=()
+
+# ── orch skill: 운영 중 에이전트에 스킬을 넣는다 ──
+# 팬을 만들지 않으므로 인자 파싱보다 앞에서 갈라진다.
+if [ "${1:-}" = "skill" ]; then
+  shift
+  . "$PROMPT_DIR/lib/skills.sh"
+  SK_ACTION="${1:-}"; shift || true
+  SK_ROLE=""; SK_TARGET=""; SK_WS=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --role) SK_ROLE="$2"; shift 2 ;;
+      --workspace) SK_WS="$2"; shift 2 ;;
+      *) SK_TARGET="$1"; shift ;;
+    esac
+  done
+  if [ -z "$SK_WS" ]; then
+    SK_WS=$(herdr workspace list 2>/dev/null | jq -r '.result.workspaces[]? | select(.focused==true) | .workspace_id' | head -1)
+  fi
+  SK_STATE=$(state_load "$PROMPT_DIR/state/$SK_WS.json")
+  SK_CWD=$(printf '%s' "$SK_STATE" | jq -r '.teams[0].cwd // ""')
+  if [ -z "$SK_CWD" ]; then SK_CWD="$PWD"; fi
+
+  case "$SK_ACTION" in
+    list)
+      printf '설치된 스킬 (%s):\n' "$(skill_target_dir "$SK_CWD")"
+      found=$(skill_installed "$SK_CWD")
+      if [ -z "$found" ]; then echo "  (없음)"; else printf '%s\n' "$found" | sed 's/^/  /'; fi
+      exit 0 ;;
+    find)
+      if [ -z "$SK_TARGET" ]; then echo "검색어가 필요합니다: orch skill find <키워드>" >&2; exit 1; fi
+      echo "'$SK_TARGET' 검색 결과:"
+      res=$(skill_find "$SK_TARGET")
+      if [ -z "$res" ]; then echo "  후보가 없습니다."; else printf '%s\n' "$res" | sed 's/^/  /'; fi
+      exit 0 ;;
+    add)
+      if [ -z "$SK_TARGET" ]; then echo "대상이 필요합니다: orch skill add <repo|키워드> --role <역할>" >&2; exit 1; fi
+      if skill_is_repo "$SK_TARGET"; then
+        REPO="$SK_TARGET"
+      else
+        echo "'$SK_TARGET' 로 검색합니다..."
+        CAND=$(skill_find "$SK_TARGET")
+        if [ -z "$CAND" ]; then echo "후보가 없습니다. 다른 키워드로 찾아보세요." >&2; exit 1; fi
+        CNT=$(printf '%s\n' "$CAND" | grep -c . || true)
+        if [ "$CNT" -gt 1 ]; then
+          echo "후보가 여러 개입니다. owner/repo 형태로 다시 지정하세요:" >&2
+          printf '%s\n' "$CAND" | sed 's/^/  /' >&2
+          exit 2
+        fi
+        REPO=$(printf '%s\n' "$CAND" | head -1)
+        echo "선택: $REPO"
+      fi
+      echo "설치 위치: $(skill_target_dir "$SK_CWD")"
+      skill_add "$SK_CWD" "$REPO" || { echo "설치 실패: $REPO" >&2; exit 1; }
+      echo "설치 완료: $REPO"
+      if [ -n "$SK_ROLE" ]; then
+        # 프리셋에 남겨야 다음에 같은 팀을 띄울 때 자동으로 깔린다
+        SK_SPEC=$(printf '%s' "$SK_STATE" | jq -r '.teams[0].spec // ""')
+        if [ -n "$SK_SPEC" ] && [ -f "$SK_SPEC" ]; then
+          if skill_record "$SK_SPEC" "$SK_ROLE" "$REPO"; then
+            echo "팀 프리셋에 기록: $(basename "$SK_SPEC") ($SK_ROLE)"
+          else
+            echo "프리셋에 '$SK_ROLE' 역할이 없어 기록은 건너뜁니다" >&2
+          fi
+        fi
+        echo "역할 '$SK_ROLE' 재구축 중..."
+        orch --reharness --only "$SK_ROLE" --workspace "$SK_WS"
+      else
+        echo "적용하려면: orch --reharness --workspace $SK_WS"
+      fi
+      exit 0 ;;
+    remove)
+      if [ -z "$SK_TARGET" ]; then echo "제거할 스킬 이름이 필요합니다" >&2; exit 1; fi
+      DIR="$(skill_target_dir "$SK_CWD")/$SK_TARGET"
+      if ! skill_guard_path "$SK_CWD" "$DIR"; then echo "경로 위반: $DIR" >&2; exit 1; fi
+      if [ ! -e "$DIR" ]; then echo "그런 스킬이 없습니다: $SK_TARGET" >&2; exit 1; fi
+      rm -rf "$DIR"
+      echo "제거 완료: $SK_TARGET"
+      if [ -n "$SK_ROLE" ]; then orch --reharness --only "$SK_ROLE" --workspace "$SK_WS"; fi
+      exit 0 ;;
+    *)
+      echo "사용법: orch skill <find|add|list|remove> [대상] [--role 역할]" >&2
+      exit 1 ;;
+  esac
+fi
+
+# ── 인자 없이 실행하면 대화형으로 묻는다 ──
+# 플래그를 하나라도 주면 예전처럼 즉시 실행한다 — 기존 스크립트가 깨지지 않는다.
+# tty 가 없으면(파이프·자동화) 마법사를 띄우지 않는다.
+if [ $# -eq 0 ] && [ -t 0 ] && [ -z "${ORCH_NO_WIZARD:-}" ]; then
+  . "$PROMPT_DIR/lib/wizard.sh"
+  if wizard_run; then
+    eval "exec $WIZ_CMD"
+  else
+    echo "취소했습니다."
+    exit 0
+  fi
+fi
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --workspace) WS="$2"; shift 2 ;;
@@ -102,6 +224,7 @@ while [ $# -gt 0 ]; do
     --status) STATUS=1; shift ;;
     --reharness) REHARNESS=1; shift ;;
     --dry-run) DRYRUN=1; shift ;;
+    --only) IFS=',' read -ra ONLY_ROLES <<< "$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --list-teams)
       for f in "$PROMPT_DIR"/teams/*.json; do
@@ -116,11 +239,16 @@ while [ $# -gt 0 ]; do
       done
       exit 0 ;;
     --show) SHOW_TEAM="$2"; shift 2 ;;
+    --self) SELF=1; shift ;;
+    --add-team) ADD_TEAM="$2"; shift 2 ;;
+    --name) TAB_NAME="$2"; shift 2 ;;
+    --tab) WANT_TAB="$2"; shift 2 ;;
+    --all-teams) ALL_TEAMS=1; shift ;;
     --stop) STOP=1; shift ;;
     --doctor) DOCTOR=1; shift ;;
     --new-team) NEWTEAM="${2:-}"; [ -n "${2:-}" ] && shift 2 || shift ;;
     --ai) NEWTEAM_AI=1; shift ;;
-    -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) N="$1"; N_SET=1; shift ;;
   esac
 done
@@ -155,6 +283,12 @@ validate_spec() { # <spec.json>
       echo "역할 #$((i+1)): en='$v' 는 herdr 규칙 위반입니다 — [a-z][a-z0-9_-]{0,31} ($f)" >&2
       bad=1
     fi
+    # skills 는 선택 필드지만, 배열이 아니면 설치 루프에서 조용히 무시된다
+    v=$(jq -r --argjson i "$i" '.roles[$i].skills // [] | if type == "array" then "ok" else "bad" end' "$f")
+    if [ "$v" = "bad" ]; then
+      echo "역할 #$((i+1)): 'skills' 는 배열이어야 합니다 ($f)" >&2
+      bad=1
+    fi
     i=$((i+1))
   done
   return $bad
@@ -179,6 +313,8 @@ if [ -n "$DOCTOR" ]; then
   else _warn "claude 없음 (--agent codex 만 쓸 거면 무관)"; fi
   if command -v codex >/dev/null 2>&1; then _ok "codex  $(codex --version 2>/dev/null | head -1)"
   else _warn "codex 없음 (--agent codex 를 쓰려면 필요)"; fi
+  if command -v npx >/dev/null 2>&1; then _ok "npx  $(command -v npx)"
+  else _warn "npx 없음 — orch skill 명령을 쓸 수 없습니다 (node 설치 필요)"; fi
   printf '  ℹ️  bash %s\n' "$BASH_VERSION"
 
   echo
@@ -438,6 +574,21 @@ fi
 STATE_DIR="$PROMPT_DIR/state"
 STATE_FILE="$STATE_DIR/$WS.json"
 
+# 현재 포커스된 탭 ID. 못 구하면 빈 문자열.
+focused_tab() {
+  herdr tab list --workspace "$WS" 2>/dev/null \
+    | jq -r '.result.tabs[]? | select(.focused == true) | .tab_id' | head -1
+}
+
+# 라벨이든 ID든 탭 ID로 정규화한다
+resolve_tab() { # <label|tab_id>
+  case "$1" in
+    "$WS":t*) printf '%s' "$1"; return 0 ;;
+  esac
+  herdr tab list --workspace "$WS" 2>/dev/null \
+    | jq -r --arg l "$1" '.result.tabs[]? | select((.label // "") == $l) | .tab_id' | head -1
+}
+
 # --status: 현재(또는 --workspace로 지정한) 워크스페이스의 에이전트만 보여준다.
 # herdr agent list에는 워크스페이스 필터가 없어 전역을 반환하므로 여기서 반드시 걸러낸다.
 if [ -n "$STATUS" ]; then
@@ -449,24 +600,55 @@ if [ -n "$STATUS" ]; then
   exit 0
 fi
 
-# ── --stop: 이 워크스페이스의 orch 팀만 정리한다 ──
+# ── --stop: 선택된 팀만 정리한다 (--all-teams 면 워크스페이스 전체) ──
 if [ -n "$STOP" ]; then
-  echo "workspace $WS 의 orch 팀 정리"
-  LABELED=$(herdr pane list --workspace "$WS" 2>/dev/null \
-    | jq -r '.result.panes[]? | select(.label != null) | "\(.pane_id)\t\(.label)"')
-  if [ -z "$LABELED" ]; then echo "  정리할 팬이 없습니다."; exit 0; fi
-  printf '%s\n' "$LABELED" | sed 's/^/  /'
+  ORCH_STATE_JSON=$(state_load "$STATE_FILE")
+  if [ -n "$ALL_TEAMS" ]; then
+    echo "workspace $WS 의 orch 팀 전체 정리"
+    TARGET_PANES=$(printf '%s' "$ORCH_STATE_JSON" \
+      | jq -r '(.teams // [])[] | .orch_pane, (.roles[]?.pane)')
+  else
+    FT=$(focused_tab)
+    WT=""
+    if [ -n "$WANT_TAB" ]; then WT=$(resolve_tab "$WANT_TAB"); fi
+    set +e
+    ORCH_TEAM_JSON=$(state_select_team "$ORCH_STATE_JSON" "$FT" "$WT")
+    rc=$?
+    set -e
+    if [ "$rc" -eq 1 ]; then echo "정리할 팀이 없습니다 (상태 파일: $STATE_FILE)"; exit 0; fi
+    if [ "$rc" -eq 2 ]; then
+      echo "이 워크스페이스에 팀이 여러 개입니다. --tab 으로 지정하거나 --all-teams 를 쓰세요:" >&2
+      state_team_menu "$ORCH_STATE_JSON" | column -t -s "$(printf '\t')" >&2
+      exit 1
+    fi
+    echo "팀 정리: $(printf '%s' "$ORCH_TEAM_JSON" | jq -r '"\(.tab_label // .tab) (\(if (.team // "") == "" then "커스텀" else .team end))"')"
+    echo "(워크스페이스 전체가 아니라 이 탭의 팀만 닫습니다. 전체는 --all-teams)"
+    TARGET_PANES=$(printf '%s' "$ORCH_TEAM_JSON" | jq -r '.orch_pane, (.roles[]?.pane)')
+  fi
+
+  if [ -z "$TARGET_PANES" ]; then echo "  정리할 팬이 없습니다."; exit 0; fi
+  printf '%s\n' "$TARGET_PANES" | sed 's/^/  /'
   if [ -z "$FORCE" ]; then
     printf '\n위 팬들을 닫습니다. 진행할까요? [y/N] '
     read -r _a </dev/tty || _a=n
     case "$_a" in [yY]*) ;; *) echo "취소했습니다."; exit 0 ;; esac
   fi
-  printf '%s\n' "$LABELED" | while IFS=$'\t' read -r p _; do
-    case "$p" in "$WS":*) herdr pane close "$p" >/dev/null 2>&1 && echo "  닫음: $p" ;;
-                 *) echo "  경계 위반으로 건너뜀: $p" >&2 ;; esac
+  for p in $TARGET_PANES; do
+    [ -n "$p" ] || continue
+    case "$p" in
+      "$WS":*) if herdr pane close "$p" >/dev/null 2>&1; then echo "  닫음: $p" || true; fi ;;
+      *) echo "  경계 위반으로 건너뜀: $p" >&2 || true ;;
+    esac
   done
-  rm -f "$STATE_FILE"
-  echo "완료. 상태 파일도 지웠습니다."
+
+  if [ -n "$ALL_TEAMS" ]; then
+    rm -f "$STATE_FILE"
+    echo "완료. 상태 파일도 지웠습니다."
+  else
+    TAB_GONE=$(printf '%s' "$ORCH_TEAM_JSON" | jq -r '.tab')
+    state_save "$STATE_FILE" "$(state_remove_team "$ORCH_STATE_JSON" "$TAB_GONE")"
+    echo "완료. 상태에서 이 팀만 제거했습니다."
+  fi
   exit 0
 fi
 
@@ -478,10 +660,43 @@ SPEC=""   # 팀 스펙 JSON 경로 (프리셋 또는 위키 분석 결과)
 
 # ── --reharness: 상태 파일에서 이 워크스페이스가 무슨 팀이었는지 복원 ──
 # 상태 파일은 워크스페이스 ID로 분리돼 있어 다른 스페이스의 설정이 섞이지 않는다.
-if [ -n "$REHARNESS" ] && [ -f "$STATE_FILE" ]; then
-  [ -n "$TEAM" ] || TEAM=$(jq -r '.team // ""' "$STATE_FILE")
-  [ -n "$CWD" ]  || CWD=$(jq -r '.cwd  // ""' "$STATE_FILE")
-  echo "상태 파일 로드: $STATE_FILE (team=${TEAM:-none})"
+if [ -n "$REHARNESS" ]; then
+  ORCH_STATE_JSON=$(state_load "$STATE_FILE")
+  FT=$(focused_tab)
+  WT=""
+  if [ -n "$WANT_TAB" ]; then WT=$(resolve_tab "$WANT_TAB"); fi
+  set +e
+  ORCH_TEAM_JSON=$(state_select_team "$ORCH_STATE_JSON" "$FT" "$WT")
+  rc=$?
+  set -e
+  if [ "$rc" -eq 2 ]; then
+    echo "이 워크스페이스에 팀이 여러 개입니다. --tab 으로 지정하세요:" >&2
+    state_team_menu "$ORCH_STATE_JSON" | column -t -s "$(printf '\t')" >&2
+    exit 1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    if [ -z "$TEAM" ]; then TEAM=$(printf '%s' "$ORCH_TEAM_JSON" | jq -r '.team // ""'); fi
+    if [ -z "$CWD" ]; then CWD=$(printf '%s' "$ORCH_TEAM_JSON" | jq -r '.cwd // ""'); fi
+    echo "상태 로드: $(printf '%s' "$ORCH_TEAM_JSON" | jq -r '.tab_label // .tab') (team=${TEAM:-none})"
+  fi
+fi
+
+# ── --add-team: 같은 워크스페이스의 새 탭에 독립 팀을 하나 더 만든다 ──
+if [ -n "$ADD_TEAM" ]; then
+  case "$ADD_TEAM" in
+    개발|dev)      TEAM="dev" ;;
+    분석|analysis) TEAM="analysis" ;;
+    기획|planning) TEAM="planning" ;;
+    테스트|qa)     TEAM="qa" ;;
+    *)             TEAM="$ADD_TEAM" ;;
+  esac
+  if [ -n "$TAB_NAME" ]; then TAB_LABEL="$TAB_NAME"; else TAB_LABEL="orch-$TEAM"; fi
+
+  # 같은 라벨의 탭이 이미 있으면 뒤에 번호를 붙인다
+  EXIST=$(herdr tab list --workspace "$WS" 2>/dev/null \
+    | jq -r --arg l "$TAB_LABEL" '[.result.tabs[]? | select((.label // "") | startswith($l))] | length')
+  if [ "$EXIST" -gt 0 ]; then TAB_LABEL="$TAB_LABEL-$((EXIST+1))"; fi
+  echo "팀 증설: 새 탭 '$TAB_LABEL' 에 $TEAM 팀을 만듭니다"
 fi
 
 # ── 팀 프리셋 ──
@@ -649,6 +864,58 @@ agent_cmdline() { # <model> <yolo_on?> <prompt_file> <resume_session?>
 }
 
 # pane split 후 새 pane_id 출력. ratio = 기존 팬이 유지하는 비율
+# ── --self: orch 자체를 고도화·관리하는 전용 세션 ──
+# 팀이 아니라 팬 하나다. 이미 있으면 새로 만들지 않고 포커스만 옮긴다.
+if [ -n "$SELF" ]; then
+  ADMIN_CWD="$PROMPT_DIR"
+  ADMIN_WS_LABEL="setting"
+  ADMIN_TAB_LABEL="orch-admin"
+
+  # 1) setting 워크스페이스를 찾는다 (없으면 만든다)
+  ADMIN_WS=$(herdr workspace list 2>/dev/null \
+    | jq -r --arg l "$ADMIN_WS_LABEL" '.result.workspaces[]? | select((.label // "") == $l) | .workspace_id' | head -1)
+  if [ -z "$ADMIN_WS" ]; then
+    echo "'$ADMIN_WS_LABEL' 워크스페이스를 만듭니다..."
+    ADMIN_WS=$(herdr workspace create --label "$ADMIN_WS_LABEL" --cwd "$ADMIN_CWD" --no-focus 2>/dev/null \
+      | jq -r '.result.workspace.workspace_id // ""')
+    [ -n "$ADMIN_WS" ] || { echo "워크스페이스 생성 실패" >&2; exit 1; }
+  fi
+
+  # 2) 이미 관리 팬이 있으면 거기로 간다 — 중복 생성은 대화 맥락을 둘로 쪼갠다
+  ADMIN_PANE=$(herdr pane list --workspace "$ADMIN_WS" 2>/dev/null \
+    | jq -r '.result.panes[]? | select((.label // "") == "orch관리") | .pane_id' | head -1)
+  if [ -n "$ADMIN_PANE" ]; then
+    echo "관리 세션이 이미 있습니다: $ADMIN_PANE"
+    herdr workspace focus "$ADMIN_WS" >/dev/null 2>&1 || true
+    herdr pane focus "$ADMIN_PANE" >/dev/null 2>&1 || true
+    exit 0
+  fi
+
+  # 3) 새 탭에 팬 하나로 띄운다
+  ADMIN_TAB=$(herdr tab create --workspace "$ADMIN_WS" --label "$ADMIN_TAB_LABEL" --cwd "$ADMIN_CWD" --focus 2>/dev/null)
+  ADMIN_PANE=$(echo "$ADMIN_TAB" | jq -r '.result.root_pane.pane_id // ""')
+  [ -n "$ADMIN_PANE" ] || { echo "탭 생성 실패: $ADMIN_TAB" >&2; exit 1; }
+
+  mkdir -p "$PROMPT_DIR/.runs"
+  ADMIN_RUN=$(mktemp -d "$PROMPT_DIR/.runs/XXXXXX")
+  AP="$ADMIN_RUN/admin.md"
+  {
+    cat "$PROMPT_DIR/admin.md"
+    printf '\n[컨텍스트] 나의_역할=orch관리 나의_pane=%s 나의_workspace=%s 작업_디렉토리=%s\n' \
+      "$ADMIN_PANE" "$ADMIN_WS" "$ADMIN_CWD"
+    printf '이 워크스페이스 밖의 팬은 다른 팀의 것이다. 도구를 고칠 뿐 남의 팀을 건드리지 마라.\n'
+  } > "$AP"
+
+  herdr pane run "$ADMIN_PANE" "cd '$ADMIN_CWD' && $TEAMS_ENV ORCH_ROLE='orch관리' ORCH_WS='$ADMIN_WS' ORCH_PANE='$ADMIN_PANE' $(agent_cmdline "$LEAD_MODEL" "$LEAD_YOLO" "$AP" "")"
+  ( for _ in 1 2 3 4 5 6 7 8; do sleep 3; herdr pane rename "$ADMIN_PANE" "orch관리" >/dev/null 2>&1 && break; done ) &
+  wait
+
+  echo "orch 관리 세션: $ADMIN_PANE (workspace $ADMIN_WS, 탭 $ADMIN_TAB_LABEL)"
+  echo "작업 디렉토리: $ADMIN_CWD"
+  echo "프롬프트: $AP"
+  exit 0
+fi
+
 split() { # <pane_id> <right|down> <ratio>
   herdr pane split "$1" --direction "$2" --ratio "$3" --no-focus | jq -r '.result.pane.pane_id'
 }
@@ -746,8 +1013,13 @@ if [ -n "$REHARNESS" ]; then
        | .agent_session.value // empty' | head -1
   }
 
-  ORCH_PANE=$(pane_of_label orch)
-  [ -n "$ORCH_PANE" ] || { echo "워크스페이스 $WS 에서 'orch' 라벨의 팬을 찾지 못했습니다." >&2; exit 1; }
+  # 오케 팬은 state 를 먼저 믿는다 — 팀이 여러 개면 라벨만으로는 어느 팀 것인지 알 수 없다.
+  ORCH_PANE=""
+  if [ -n "${ORCH_TEAM_JSON:-}" ]; then
+    ORCH_PANE=$(printf '%s' "$ORCH_TEAM_JSON" | jq -r '.orch_pane // ""')
+  fi
+  if [ -z "$ORCH_PANE" ]; then ORCH_PANE=$(pane_of_label orch); fi
+  [ -n "$ORCH_PANE" ] || { echo "워크스페이스 $WS 에서 오케스트레이터 팬을 찾지 못했습니다 (state 없음, 'orch' 라벨도 없음)." >&2; exit 1; }
 
   echo "workspace $WS 하네스 재구축${DRYRUN:+ (드라이런)}"
   echo "  팀: $(jq -r '.name' "$SPEC")   작업 디렉토리: ${CWD:-$PWD}"
@@ -821,6 +1093,28 @@ if [ -n "$REHARNESS" ]; then
     ei=$((ei+1))
   done < <(printf '%s' "$PANES_JSON" | jq -r '.result.panes[]? | .label // empty')
 
+  # --only: 지정한 역할만 남긴다. 스킬 하나를 넣으려고 팀 전체를 흔들 이유가 없다.
+  if [ "${#ONLY_ROLES[@]}" -gt 0 ]; then
+    FILTERED=()
+    for row in "${RH_PLAN[@]}"; do
+      IFS=$'\t' read -r _p _n _s _f _m _y _sess <<< "$row"
+      for want in "${ONLY_ROLES[@]}"; do
+        if [ "$_n" = "$want" ] || [ "$_s" = "$want" ]; then FILTERED+=("$row"); break; fi
+      done
+    done
+    if [ "${#FILTERED[@]}" -eq 0 ]; then
+      echo "--only 로 지정한 역할을 찾지 못했습니다: ${ONLY_ROLES[*]}" >&2
+      echo "이 팀의 역할:" >&2
+      for row in "${RH_PLAN[@]}"; do
+        IFS=$'\t' read -r _p _n _s _f _m _y _sess <<< "$row"
+        printf '  %s (%s)\n' "$_n" "$_s" >&2
+      done
+      exit 1
+    fi
+    RH_PLAN=("${FILTERED[@]}")
+    echo "--only: ${#RH_PLAN[@]}개 팬만 재구축합니다"
+  fi
+
   # 계획 출력
   printf '\n%-10s %-14s %-10s %s\n' "PANE" "역할" "재개" "프롬프트"
   for row in "${RH_PLAN[@]}"; do
@@ -862,23 +1156,27 @@ fi
 # orch가 둘, PM이 둘이 되고 orch-msg 주소지정이 모호해진다. 상태 파일도 덮어써진다.
 EXISTING=$(herdr pane list --workspace "$WS" 2>/dev/null \
   | jq -r '[.result.panes[]? | select((.label // "") == "orch")] | length')
-if [ "${EXISTING:-0}" -gt 0 ] && [ -z "$FORCE" ]; then
+# --add-team 은 팀을 하나 더 만드는 게 목적이므로 이 검사를 건너뛴다.
+if [ "${EXISTING:-0}" -gt 0 ] && [ -z "$FORCE" ] && [ -z "$ADD_TEAM" ]; then
   echo "이 워크스페이스($WS)에는 이미 orch 팀이 있습니다." >&2
   echo "" >&2
+  echo "  팀을 하나 더    orch --add-team <용도>   (새 탭에 독립 팀)" >&2
   echo "  현황 보기   orch --status --workspace $WS" >&2
   echo "  정리 후 재생성  orch --stop --workspace $WS" >&2
   echo "  프롬프트만 갱신  orch --reharness --workspace $WS" >&2
   echo "  새 스페이스에   herdr 에서 새 워크스페이스를 만든 뒤 실행" >&2
   echo "" >&2
-  echo "그래도 겹쳐 만들려면 --force (라벨이 중복되어 메시지 주소지정이 모호해집니다)" >&2
+  echo "그래도 같은 탭 구성으로 겹쳐 만들려면 --force" >&2
   exit 1
 fi
 
 echo "workspace $WS 에 orch 팀 생성 중 (에이전트 ${N}개)..."
 
 # ── 탭 1: orch(좌 50%) + 에이전트 최대 4개(우 50%, 가로 스택) ──
-TAB1=$(herdr tab create --workspace "$WS" --label orch "${TAB_CWD[@]+"${TAB_CWD[@]}"}" --focus)
+TAB1=$(herdr tab create --workspace "$WS" --label "$TAB_LABEL" "${TAB_CWD[@]+"${TAB_CWD[@]}"}" --focus)
 ORCH_PANE=$(echo "$TAB1" | jq -r '.result.root_pane.pane_id')
+# 탭 ID 는 tab create 응답에서 바로 꺼낸다 (형제 팀 표·state 기록에 쓴다)
+TAB1_ID=$(echo "$TAB1" | jq -r '.result.tab.tab_id // ""')
 [ -n "$ORCH_PANE" ] && [ "$ORCH_PANE" != null ] || { echo "탭 생성 실패: $TAB1" >&2; exit 1; }
 
 RIGHT=$(split "$ORCH_PANE" right 0.5)
@@ -927,7 +1225,41 @@ OP="$RUN_DIR/orch.md"
   if [ "${#WIKIS[@]}" -gt 0 ]; then printf '위키 디렉토리=%s\n' "$WIKI_ABS"; fi
   if [ -n "$SPEC" ]; then printf '팀 스펙 파일=%s\n' "$SPEC"; fi
 } > "$OP"
+
+# 같은 워크스페이스에 다른 팀이 있으면 오케에게 알려준다.
+# 팀 간 통신은 오케↔오케로만 한다 — 남의 팀 에이전트에 직접 쏘면 그 팀 오케가 상황을 모른다.
+SIBLINGS=$(state_load "$STATE_FILE" | jq -r --arg tab "$TAB1_ID" '
+  (.teams // [])[] | select(.tab != $tab)
+  | "| \(if (.team // "") == "" then "커스텀" else .team end) | \(.tab_label // .tab) | \(.orch_pane) |"')
+if [ -n "$SIBLINGS" ]; then
+  {
+    printf '\n## 같은 워크스페이스의 다른 팀\n\n'
+    printf '| 팀 | 탭 | 오케 팬 |\n|---|---|---|\n'
+    printf '%s\n' "$SIBLINGS"
+    printf '\n규칙: 다른 팀에는 **그 팀의 오케 팬에만** 보낸다.\n'
+    printf '남의 팀 에이전트에 직접 보내지 마라 — 그 팀 오케가 상황을 모르게 된다.\n'
+  } >> "$OP"
+fi
+
 start_claude "$ORCH_PANE" orch "$LEAD_MODEL" "$OP" "$LEAD_YOLO"
+
+# ── 팀 프리셋에 기록된 스킬 설치 ──
+# 팬마다가 아니라 팀 cwd 에 한 번만 깔면 된다. 설치 실패가 팀 생성을 막지는 않는다 —
+# 네트워크가 없어도 팀은 떠야 한다.
+if [ -n "$SPEC" ] && [ -f "$SPEC" ]; then
+  . "$PROMPT_DIR/lib/skills.sh"
+  PRESET_SKILLS=$(skill_list_for_spec "$SPEC")
+  if [ -n "$PRESET_SKILLS" ]; then
+    echo "팀 프리셋에 기록된 스킬을 설치합니다..."
+    for sk in $PRESET_SKILLS; do
+      if skill_add "${CWD:-$PWD}" "$sk" >/dev/null 2>&1; then
+        echo "  설치: $sk"
+      else
+        echo "  실패(건너뜀): $sk" >&2
+      fi
+    done
+  fi
+fi
 
 # ── 에이전트 실행 ──
 idx=0
@@ -943,25 +1275,44 @@ for pid in "${AGENT_PANES[@]}"; do
 done
 
 # ── 상태 저장 ──
-# --reharness 가 나중에 "이 워크스페이스가 무슨 팀이었는지"를 알아야 하므로 기록한다.
-# 워크스페이스 ID를 파일명으로 쓰므로 스페이스별로 완전히 분리된다.
-mkdir -p "$STATE_DIR"
-{
-  printf '{\n  "workspace": "%s",\n  "team": "%s",\n  "cwd": "%s",\n' \
-    "$WS" "${TEAM:-}" "${CWD:-$PWD}"
-  printf '  "spec": "%s",\n  "orch_pane": "%s",\n  "model": "%s",\n  "lead_model": "%s",\n' \
-    "${SPEC:-}" "$ORCH_PANE" "$MODEL" "$LEAD_MODEL"
-  printf '  "created": "%s",\n  "roles": [\n' "$(date '+%Y-%m-%dT%H:%M:%S')"
-  i=0
-  for pid in "${AGENT_PANES[@]}"; do
-    nm="${ROLES[i]:-$(role_field $i name)}"; [ -n "$nm" ] || nm="agent-$((i+1))"
-    sg=$(role_field "$i" en); [ -n "$sg" ] || sg="agent-$((i+1))"
-    [ "$i" -gt 0 ] && printf ',\n'
-    printf '    {"idx": %d, "name": "%s", "slug": "%s", "pane": "%s"}' "$i" "$nm" "$sg" "$pid"
-    i=$((i+1))
+# --reharness / --stop 이 "이 탭이 무슨 팀이었는지"를 알아야 하므로 기록한다.
+# v2 스키마라 한 워크스페이스에 팀이 여러 개 있어도 서로 덮어쓰지 않는다.
+ROLES_JSON="[]"
+i=0
+for pid in "${AGENT_PANES[@]}"; do
+  nm="${ROLES[i]:-$(role_field $i name)}"
+  if [ -z "$nm" ]; then nm="agent-$((i+1))"; fi
+  sg=$(role_field "$i" en)
+  if [ -z "$sg" ]; then sg="agent-$((i+1))"; fi
+  ROLES_JSON=$(printf '%s' "$ROLES_JSON" | jq --argjson idx "$i" \
+    --arg n "$nm" --arg s "$sg" --arg p "$pid" \
+    '. + [{idx:$idx, name:$n, slug:$s, pane:$p}]')
+  i=$((i+1))
+done
+
+TEAM_JSON=$(jq -n \
+  --arg tab "$TAB1_ID" --arg label "${TAB_LABEL:-orch}" --arg team "${TEAM:-}" \
+  --arg cwd "${CWD:-$PWD}" --arg spec "${SPEC:-}" --arg op "$ORCH_PANE" \
+  --arg model "$MODEL" --arg lead "$LEAD_MODEL" \
+  --arg created "$(date '+%Y-%m-%dT%H:%M:%S')" --argjson roles "$ROLES_JSON" \
+  '{tab:$tab, tab_label:$label, team:$team, cwd:$cwd, spec:$spec,
+    orch_pane:$op, model:$model, lead_model:$lead, created:$created, roles:$roles}')
+
+CUR=$(state_load "$STATE_FILE")
+CUR=$(printf '%s' "$CUR" | jq --arg ws "$WS" '.workspace = $ws')
+state_save "$STATE_FILE" "$(state_upsert_team "$CUR" "$TEAM_JSON")"
+
+# 증설이면 기존 팀 오케들에게 한 번 알린다. 재기동이 아니라 메시지라 진행 중 작업을 끊지 않는다.
+if [ -n "$ADD_TEAM" ]; then
+  OLD_ORCHS=$(state_load "$STATE_FILE" | jq -r --arg tab "$TAB1_ID" \
+    '(.teams // [])[] | select(.tab != $tab) | .orch_pane')
+  for op in $OLD_ORCHS; do
+    case "$op" in "$WS":*) ;; *) continue ;; esac
+    # herdr agent send 는 입력만 하고 제출하지 않는다 — send-keys enter 가 반드시 뒤따라야 한다
+    herdr agent send "$op" "[orch] 같은 워크스페이스에 새 팀이 생겼다: $TEAM (탭 $TAB_LABEL, 오케 팬 $ORCH_PANE). 협업이 필요하면 그 팬으로 보내라." >/dev/null 2>&1 || true
+    herdr pane send-keys "$op" enter >/dev/null 2>&1 || true
   done
-  printf '\n  ]\n}\n'
-} > "$STATE_FILE"
+fi
 
 echo "완료: orch=$ORCH_PANE, 에이전트 ${#AGENT_PANES[@]}개"
 echo "프롬프트: $RUN_DIR"
