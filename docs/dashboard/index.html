@@ -190,14 +190,24 @@ var STATUS_COLOR = {working:"#2ee6a8", blocked:"#ffb340", idle:"#4a5a6e", done:"
  * @param {Array<{ts:string,from:string,to:string,body:string}>} messages 이 팀의 메시지(시간순)
  * @returns {Array} 화면에 그릴 순서대로 정렬된 배열
  *
- * TODO(오너): 정렬 기준을 정해주세요. 고려할 축:
- *   - blocked 를 맨 위로? (막힌 사람이 곧 병목)
- *   - 마지막 메시지가 오래된 순? (조용히 놀고 있는 사람을 찾음)
- *   - 팀 편성 순서 고정? (위치가 안 바뀌어 눈이 익음 — 지금 동작)
- * 지금은 편성 순서 그대로 둡니다.
+ * 기준: 막힘 → 작업 중 → 대기 → 알 수 없음.
+ * 막힌 사람이 곧 병목이라 맨 위로 올린다.
+ * 그룹 안에서는 팀 편성 순서를 그대로 지킨다 — 순서가 매번 섞이면
+ * 같은 사람을 다시 찾는 데 시간이 걸려 정렬을 안 하느니만 못하다.
+ * 편성 순서를 고정하고 싶으면 본문을 `return agents;` 로 되돌리면 된다.
  */
 function sortAgents(agents, messages) {
-  return agents;
+  var RANK = {blocked: 0, working: 1, idle: 2, done: 2, unknown: 3};
+  return agents
+    .map(function(a, i){ return {a: a, i: i}; })
+    .sort(function(x, y){
+      var rx = RANK[x.a.status], ry = RANK[y.a.status];
+      if (rx === undefined) rx = 3;
+      if (ry === undefined) ry = 3;
+      // 등급이 같으면 원래 자리를 지킨다 (안정 정렬을 엔진에 맡기지 않는다)
+      return rx !== ry ? rx - ry : x.i - y.i;
+    })
+    .map(function(o){ return o.a; });
 }
 
 function esc(s){ return String(s == null ? "" : s).replace(/[&<>"]/g, function(c){
